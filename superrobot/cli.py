@@ -52,7 +52,7 @@ def _ensure_auth(no_tui: bool) -> None:
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command("import")
 def import_cmd(
     source: Annotated[str, typer.Argument(help="GitHub URL or local path")],
     skip_eval: Annotated[bool, typer.Option("--skip-eval")] = False,
@@ -114,7 +114,7 @@ def template(
     SuperRobotApp(mode="template", skip_eval=skip_eval).run()
 
 
-@app.command()
+@app.command("scan")
 def scan_cmd(
     path: Annotated[str, typer.Argument(help="Local repo path")],
 ) -> None:
@@ -123,7 +123,7 @@ def scan_cmd(
     typer.echo(result.model_dump_json(indent=2))
 
 
-@app.command()
+@app.command("analyze")
 def analyze_cmd(
     path: Annotated[str, typer.Argument(help="Local repo path")],
 ) -> None:
@@ -147,7 +147,7 @@ def generate(
     typer.echo(f"Generated files written to {out}")
 
 
-@app.command()
+@app.command("eval")
 def eval_cmd(
     path: Annotated[str, typer.Option("--path", "-p")] = ".",
 ) -> None:
@@ -158,7 +158,7 @@ def eval_cmd(
     typer.echo(summary.model_dump_json(indent=2))
 
 
-@app.command()
+@app.command("deploy")
 def deploy_cmd(
     path: Annotated[str, typer.Option("--path", "-p")] = ".",
 ) -> None:
