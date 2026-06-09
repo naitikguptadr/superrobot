@@ -9,9 +9,12 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from rich.console import Console
 
 from superrobot import __version__
 from superrobot.app import SuperRobotApp
+from superrobot.env import load_user_env
+from superrobot.live import run_live_query
 from superrobot.pipeline.analyzer import analyze
 from superrobot.pipeline.config_generator import (
     generate_config,
@@ -22,13 +25,22 @@ from superrobot.pipeline.deployer import deploy
 from superrobot.pipeline.evaluator import run_eval
 from superrobot.pipeline.scanner import scan
 from superrobot.pipeline.ui_generator import generate_ui_component
+from superrobot.repo import clone_repository
+from superrobot.setup.checks import run_all_checks
+from superrobot.setup.runner import SetupRunner
+from superrobot.setup.state import is_setup_complete
 from superrobot.startup import check_prerequisites, print_missing_prerequisites
+from superrobot.tui.setup_app import SetupApp
+
+load_user_env()
 
 app = typer.Typer(
     name="superrobot",
     help="Bring any Python agent to DataRobot without rebuilding it from scratch.",
     no_args_is_help=True,
 )
+
+console = Console()
 
 
 def _ensure_prerequisites() -> None:
@@ -44,12 +56,67 @@ def _ensure_auth(no_tui: bool) -> None:
         return await check_auth()
 
     if not asyncio.run(_check()):
-        msg = "Auth failed. Run: dr auth login"
+        msg = "Auth failed. Run: dr auth login  (or: superrobot setup)"
         if no_tui:
             print(msg, file=sys.stderr)
         else:
             typer.echo(msg, err=True)
         raise typer.Exit(1)
+
+
+def _ensure_setup(*, strict: bool = True) -> None:
+    """Warn or exit if setup has not been completed."""
+    if is_setup_complete():
+        return
+    msg = "Setup incomplete. Run: superrobot setup"
+    if strict:
+        console.print(f"[yellow]{msg}[/]")
+        raise typer.Exit(1)
+    console.print(f"[dim]{msg}[/]")
+
+
+@app.command("setup")
+def setup_cmd(
+    check_only: Annotated[bool, typer.Option("--check", help="Verify setup only")] = False,
+    no_tui: Annotated[
+        bool, typer.Option("--no-tui", help="Use Rich prompts instead of TUI")
+    ] = False,
+    skip_gateway: Annotated[
+        bool, typer.Option("--skip-gateway", help="Skip LLM gateway test")
+    ] = False,
+) -> None:
+    """Interactive first-run setup — tools, auth, credentials, gateway verify."""
+    if check_only:
+        result = asyncio.run(run_all_checks())
+        _print_setup_status(result)
+        raise typer.Exit(0 if result.is_ready else 1)
+
+    if no_tui:
+        result = asyncio.run(SetupRunner(console=console).run(skip_gateway=skip_gateway))
+        raise typer.Exit(0 if result.is_ready else 1)
+
+    SetupApp().run()
+
+
+def _print_setup_status(result: object) -> None:
+    from superrobot.setup.checks import SetupCheckResult
+
+    assert isinstance(result, SetupCheckResult)
+    table_items = [
+        ("Prerequisites", result.prerequisites_ok),
+        ("dr auth", result.auth_ok),
+        ("Environment", result.env_ok),
+        ("LLM Gateway", result.gateway_ok),
+    ]
+    for label, ok in table_items:
+        icon = "[green]✓[/]" if ok else "[red]✗[/]"
+        console.print(f"  {icon} {label}")
+    if result.gateway_error:
+        console.print(f"  [dim]Gateway: {result.gateway_error}[/]")
+    if result.is_ready:
+        console.print("\n[green]Setup complete — ready to use SuperRobot.[/]")
+    else:
+        console.print("\n[yellow]Run superrobot setup to finish configuration.[/]")
 
 
 @app.command("import")
@@ -60,8 +127,11 @@ def import_cmd(
     model: Annotated[str | None, typer.Option("--model")] = None,
     debug: Annotated[bool, typer.Option("--debug")] = False,
     no_tui: Annotated[bool, typer.Option("--no-tui")] = False,
+    skip_setup_check: Annotated[bool, typer.Option("--skip-setup-check")] = False,
 ) -> None:
     """Brownfield import: full Scan → Deploy pipeline."""
+    if not skip_setup_check:
+        _ensure_setup()
     _ensure_prerequisites()
     _ensure_auth(no_tui)
     if debug:
@@ -73,7 +143,7 @@ def import_cmd(
 
         os.environ["SUPERROBOT_MODEL"] = model
 
-    repo_path = _resolve_source(source)
+    repo_path = asyncio.run(_resolve_source(source))
     if no_tui:
         asyncio.run(_run_import_headless(repo_path, output_dir, skip_eval))
         return
@@ -90,8 +160,11 @@ def import_cmd(
 def new_cmd(
     skip_eval: Annotated[bool, typer.Option("--skip-eval")] = False,
     no_tui: Annotated[bool, typer.Option("--no-tui")] = False,
+    skip_setup_check: Annotated[bool, typer.Option("--skip-setup-check")] = False,
 ) -> None:
     """Greenfield: wizard → generate → deploy."""
+    if not skip_setup_check:
+        _ensure_setup()
     _ensure_prerequisites()
     _ensure_auth(no_tui)
     if no_tui:
@@ -104,8 +177,11 @@ def new_cmd(
 def template(
     skip_eval: Annotated[bool, typer.Option("--skip-eval")] = False,
     no_tui: Annotated[bool, typer.Option("--no-tui")] = False,
+    skip_setup_check: Annotated[bool, typer.Option("--skip-setup-check")] = False,
 ) -> None:
     """Browse DR templates → customize → deploy."""
+    if not skip_setup_check:
+        _ensure_setup()
     _ensure_prerequisites()
     _ensure_auth(no_tui)
     if no_tui:
@@ -171,9 +247,19 @@ def deploy_cmd(
 
 
 @app.command()
-def live() -> None:
-    """Attach to deployed agent and show live graph."""
-    typer.echo("Live mode: connect to deployed agent (not yet implemented)")
+def live(
+    path: Annotated[str, typer.Option("--path", "-p", help="Agent project directory")] = ".",
+    query: Annotated[str, typer.Option("--query", "-q")] = "Hello, test query",
+) -> None:
+    """Attach to locally running agent and show execution result."""
+    _ensure_prerequisites()
+    result = asyncio.run(run_live_query(query, cwd=path))
+    if result.success:
+        typer.echo(result.output)
+        typer.echo(f"\nExecution path: {' → '.join(result.active_nodes)}", err=True)
+    else:
+        typer.echo(result.stderr or "Live run failed", err=True)
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -238,17 +324,15 @@ async def _run_import_headless(repo_path: str, output_dir: str | None, skip_eval
         print(json.dumps({"stage": "eval", "result": summary.model_dump()}, indent=2))
 
 
-def _resolve_source(source: str) -> str:
+async def _resolve_source(source: str) -> str:
     path = Path(source)
     if path.exists():
         return str(path.resolve())
-    if source.startswith("http"):
-        typer.echo(f"GitHub clone not yet implemented; use local path. Got: {source}", err=True)
-        raise typer.Exit(1)
-    if not path.exists():
-        typer.echo(f"Path not found: {source}", err=True)
-        raise typer.Exit(1)
-    return str(path.resolve())
+    if source.startswith("http") or "github.com" in source:
+        cloned = await clone_repository(source)
+        return str(cloned)
+    msg = f"Path not found: {source}"
+    raise typer.BadParameter(msg)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,10 @@ import platform
 import shutil
 import sys
 
+from superrobot.env import load_user_env
+
+load_user_env()
+
 REQUIRED_BINARIES = ["dr", "uv", "task", "pulumi", "node", "npm"]
 
 _INSTALL_HINTS: dict[str, dict[str, str]] = {

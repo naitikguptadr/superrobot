@@ -43,3 +43,8 @@ tasks:
       - task: format-check
       - task: typecheck
       - task: test
+
+  setup-check:
+    desc: Verify SuperRobot setup status
+    cmds:
+      - uv run superrobot setup --check

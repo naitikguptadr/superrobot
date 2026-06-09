@@ -15,7 +15,23 @@ SuperRobot is a TUI-powered CLI for migrating existing Python agents (LangChain,
 ```bash
 uv sync --all-extras
 task qa
+superrobot setup          # first-run wizard: tools, auth, credentials, gateway
 superrobot import ./path/to/your-agent
+```
+
+### Setup
+
+`superrobot setup` walks you through everything in one flow:
+
+1. **Prerequisites** — checks `dr`, `uv`, `task`, `pulumi`, `node`, `npm`
+2. **Authentication** — runs `dr auth login` if needed
+3. **Credentials** — saves `DATAROBOT_ENDPOINT` + `DATAROBOT_API_TOKEN` to `~/.config/superrobot/.env`
+4. **Gateway verify** — pings the LLM Gateway
+
+```bash
+superrobot setup              # TUI wizard (default)
+superrobot setup --no-tui     # Rich terminal prompts
+superrobot setup --check      # verify current setup
 ```
 
 ## Commands

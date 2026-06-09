@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TypeVar
 
@@ -85,6 +86,35 @@ class LLMGateway:
                 raise
 
         raise LLMOutputValidationError("Unreachable", raw_outputs)
+
+    async def ping(self) -> bool:
+        """Minimal gateway connectivity check."""
+        try:
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                messages=[{"role": "user", "content": "Reply with OK"}],
+                max_tokens=5,
+            )
+            return bool(response.choices[0].message.content)
+        except Exception:
+            return False
+
+    async def stream_text(self, prompt_name: str, user_content: str) -> AsyncIterator[str]:
+        """Stream raw text from LLM Gateway."""
+        system = self.load_prompt(prompt_name)
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content},
+        ]
+        stream = await self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            stream=True,
+        )
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
 
     async def call_text(self, prompt_name: str, user_content: str) -> str:
         """Call LLM Gateway and return raw text (no JSON validation)."""
