@@ -1,0 +1,24 @@
+{
+  "colors": {
+    "primary": "var(--dr-color-primary)",
+    "secondary": "var(--dr-color-secondary)",
+    "success": "var(--dr-color-success)",
+    "warning": "var(--dr-color-warning)",
+    "error": "var(--dr-color-error)",
+    "background": "var(--dr-color-background)",
+    "surface": "var(--dr-color-surface)"
+  },
+  "spacing": {
+    "xs": "4px",
+    "sm": "8px",
+    "md": "16px",
+    "lg": "24px",
+    "xl": "32px"
+  },
+  "typography": {
+    "fontFamily": "var(--dr-font-family)",
+    "fontSizeSm": "12px",
+    "fontSizeMd": "14px",
+    "fontSizeLg": "18px"
+  }
+}

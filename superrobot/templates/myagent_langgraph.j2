@@ -1,0 +1,26 @@
+"""{{ agent_purpose }} — LangGraph agent for DataRobot."""
+
+import os
+from typing import Any
+
+import datarobot as dr
+from datarobot_genai import LangGraphAgent  # verify against recipe-datarobot-agent-templates
+
+
+class MyAgent(LangGraphAgent):
+    """Generated LangGraph agent."""
+
+    def __init__(self, runtime_params: dict[str, str] | None = None) -> None:
+        super().__init__()
+        self._runtime_params = runtime_params or {}
+
+    @property
+    def system_prompt(self) -> str:
+        template = dr.genai.PromptTemplate.get(os.environ["PROMPT_TEMPLATE_ID"])
+        return template.get_latest_version().to_fstring()
+
+    async def process(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Process input and return structured output."""
+        # TODO: migrate logic from {{ entry_file }}::{{ entry_function }}
+        result = await self.run_graph(payload)
+        return {"response": str(result)}

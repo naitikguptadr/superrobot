@@ -1,0 +1,74 @@
+Screen {
+    background: $surface;
+}
+
+#header-bar {
+    dock: top;
+    height: 1;
+    background: $primary;
+    color: $text;
+    padding: 0 1;
+}
+
+#main-grid {
+    layout: grid;
+    grid-size: 2 2;
+    grid-rows: 1fr 1fr;
+    grid-columns: 1fr 2fr;
+}
+
+#pipeline-panel {
+    border: solid $primary;
+    padding: 1;
+}
+
+#graph-panel {
+    border: solid $accent;
+    padding: 1;
+}
+
+#copilot-panel {
+    border: solid $warning;
+    padding: 1;
+}
+
+#config-panel {
+    border: solid $success;
+    padding: 1;
+}
+
+.pipeline-step-done {
+    color: $success;
+}
+
+.pipeline-step-active {
+    color: $accent;
+}
+
+.pipeline-step-pending {
+    color: $text-muted;
+}
+
+.pipeline-step-failed {
+    color: $error;
+}
+
+.node-valid {
+    border: solid $success;
+}
+
+.node-warning {
+    border: solid $warning;
+}
+
+.node-error {
+    border: solid $error;
+}
+
+.node-ui {
+    border: solid $accent;
+}
+
+.node-active {
+    border: heavy $accent;
+}
