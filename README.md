@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤖 SuperRobot
+# SuperRobot
 
 ### Bring any Python agent to DataRobot — without rebuilding it from scratch.
 
@@ -160,7 +160,7 @@ Jinja2 templates) and validated against [encoded platform rules](#encoded-dataro
 
 ## Superpowers
 
-### 🧠 Live agent graph
+### Live agent graph
 
 The TUI renders your agent's **real execution graph**, horizontally, left-to-right. For
 LangGraph repos it parses the actual `StateGraph` — `add_node`, `add_edge`, and
@@ -169,14 +169,14 @@ you see true node names and flow, color-coded by node type (LLM call, tool, rout
 other frameworks it builds a heuristic flow from the entry point through detected LLM clients
 and `@tool` functions.
 
-### 🤝 AI Copilot
+### AI Copilot
 
 A streaming copilot fires at each stage with insights that reference *your actual code* — never
 generic tips. Suggestions it can auto-apply (flat-import fixes, config changes) are marked
 `→ press a to apply`; source-repo recommendations are clearly flagged as manual. Every applied
 fix re-runs the affected template and reports exactly which files changed.
 
-### 🎨 Generative dr-ui builder
+### Generative dr-ui builder
 
 Describe a component in plain English (`"research report viewer with query input and summary
 card"`) and get a valid `@dr-ui` React/TypeScript component. SuperRobot writes a **self-contained
@@ -188,7 +188,7 @@ build. Available inline in the TUI or standalone:
 superrobot ui add "results panel with confidence scores" --preview
 ```
 
-### ✅ Pre-deploy evaluation
+### Pre-deploy evaluation
 
 A 5-shot eval that runs **before** anything touches production — the local workaround for the
 missing `dr push-to-playground`. It tries `dr run dev` first, then falls back to executing your
@@ -197,7 +197,7 @@ no uncaught exception, output matches the inferred schema, latency < 30s, non-nu
 Failures are surfaced with real reasons (`crash: ModuleNotFoundError: No module named 'dotenv'`),
 not just "crash".
 
-### 🔌 LLM Gateway migration
+### LLM Gateway migration
 
 The headline capability: a generated `dr_llm.py` shim rewires every LLM client constructor in
 your code (`ChatOpenAI`, `AzureChatOpenAI`, `OpenAI`, `AsyncOpenAI`) to route through the
@@ -345,7 +345,7 @@ To stay focused, SuperRobot deliberately does **not**:
 
 <div align="center">
 
-Built by **[@naitikguptadr](https://github.com/naitikguptadr)** during an internal DataRobot hackathon. 🛠️
+Built by **[@naitikguptadr](https://github.com/naitikguptadr)** during an internal DataRobot hackathon.
 
 *Brownfield agents deserve a path to production too.*
 
