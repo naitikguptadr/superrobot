@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 
 class NodeDetailModal(ModalScreen[None]):
     """Shows schema, latency, and cost estimates for a graph node."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
 
     DEFAULT_CSS = """
     NodeDetailModal {
@@ -41,3 +44,6 @@ class NodeDetailModal(ModalScreen[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "close-btn":
             self.dismiss(None)
+
+    def action_close(self) -> None:
+        self.dismiss(None)

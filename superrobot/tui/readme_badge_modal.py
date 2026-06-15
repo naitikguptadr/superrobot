@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 
 class ReadmeBadgeModal(ModalScreen[bool]):
     """Show README diff and ask for confirmation."""
+
+    BINDINGS = [
+        Binding("y", "confirm", "Commit badge"),
+        Binding("n", "skip", "Skip"),
+        Binding("escape", "skip", "Skip"),
+    ]
 
     DEFAULT_CSS = """
     ReadmeBadgeModal {
@@ -40,3 +47,9 @@ class ReadmeBadgeModal(ModalScreen[bool]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes-btn")
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_skip(self) -> None:
+        self.dismiss(False)

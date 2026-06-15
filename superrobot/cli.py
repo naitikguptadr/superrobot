@@ -123,17 +123,21 @@ def _print_setup_status(result: object) -> None:
 def import_cmd(
     source: Annotated[str, typer.Argument(help="GitHub URL or local path")],
     skip_eval: Annotated[bool, typer.Option("--skip-eval")] = False,
-    output_dir: Annotated[str | None, typer.Option("--output-dir")] = None,
+    output_dir: Annotated[str | None, typer.Option("--output-dir", "-o")] = None,
     model: Annotated[str | None, typer.Option("--model")] = None,
     debug: Annotated[bool, typer.Option("--debug")] = False,
     no_tui: Annotated[bool, typer.Option("--no-tui")] = False,
     skip_setup_check: Annotated[bool, typer.Option("--skip-setup-check")] = False,
+    skip_auth_check: Annotated[
+        bool, typer.Option("--skip-auth-check", help="Skip dr auth (local/CI only)")
+    ] = False,
 ) -> None:
     """Brownfield import: full Scan → Deploy pipeline."""
     if not skip_setup_check:
         _ensure_setup()
     _ensure_prerequisites()
-    _ensure_auth(no_tui)
+    if not skip_auth_check:
+        _ensure_auth(no_tui)
     if debug:
         import os
 
@@ -226,12 +230,34 @@ def generate(
 @app.command("eval")
 def eval_cmd(
     path: Annotated[str, typer.Option("--path", "-p")] = ".",
+    bundle: Annotated[
+        str | None,
+        typer.Option("--bundle", help="Generated bundle dir to eval (default: <path>/.superrobot)"),
+    ] = None,
 ) -> None:
     """Run 5-shot pre-deploy eval."""
     scan_result = scan(path)
     analysis_result = asyncio.run(analyze(scan_result))
-    summary = asyncio.run(run_eval(analysis_result, cwd=path))
+    cwd = bundle or str(Path(path) / ".superrobot")
+    if not Path(cwd).exists():
+        cwd = path
+    summary = asyncio.run(
+        run_eval(analysis_result, cwd=cwd, entry=_entry_info_from_scan(scan_result))
+    )
     typer.echo(summary.model_dump_json(indent=2))
+
+
+def _entry_info_from_scan(scan_result: object) -> tuple[str, str, list[str]] | None:
+    from superrobot.models.agent_config import parse_signature_params
+    from superrobot.models.scan_result import ScanResult
+    from superrobot.pipeline.config_generator import flat_module_name
+
+    assert isinstance(scan_result, ScanResult)
+    if not scan_result.entry_points:
+        return None
+    ep = scan_result.entry_points[0]
+    module = flat_module_name(scan_result.repo_path, ep.file)
+    return (module, ep.function, parse_signature_params(ep.signature))
 
 
 @app.command("deploy")
@@ -268,21 +294,38 @@ def diff(
     config_b: Annotated[str, typer.Argument()],
 ) -> None:
     """Compare two agent configs side by side."""
+    import difflib
+
+    for p in (config_a, config_b):
+        if not Path(p).is_file():
+            raise typer.BadParameter(f"File not found: {p}")
     a = Path(config_a).read_text()
     b = Path(config_b).read_text()
     if a == b:
         typer.echo("Configs are identical")
-    else:
-        typer.echo(f"Configs differ ({len(a)} vs {len(b)} chars)")
+        return
+    diff_lines = difflib.unified_diff(
+        a.splitlines(), b.splitlines(), fromfile=config_a, tofile=config_b, lineterm=""
+    )
+    for line in diff_lines:
+        typer.echo(line)
+    raise typer.Exit(1)
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"superrobot {__version__}")
+        raise typer.Exit()
 
 
 @app.callback()
 def main(
-    version: Annotated[bool, typer.Option("--version", "-V")] = False,
+    version: Annotated[
+        bool,
+        typer.Option("--version", "-V", callback=_version_callback, is_eager=True),
+    ] = False,
 ) -> None:
-    if version:
-        typer.echo(f"superrobot {__version__}")
-        raise typer.Exit()
+    """SuperRobot — bring any Python agent to DataRobot."""
 
 
 ui_app = typer.Typer(help="dr-ui component builder")
@@ -293,6 +336,10 @@ app.add_typer(ui_app, name="ui")
 def ui_add(
     description: Annotated[str, typer.Argument(help="Component description")],
     path: Annotated[str, typer.Option("--path", "-p")] = ".",
+    preview: Annotated[
+        bool, typer.Option("--preview", help="Write ui/preview.html and open it in a browser")
+    ] = False,
+    output_dir: Annotated[str | None, typer.Option("--output-dir", "-o")] = None,
 ) -> None:
     """Generate a dr-ui component from description."""
     _ensure_prerequisites()
@@ -300,6 +347,18 @@ def ui_add(
     analysis_result = asyncio.run(analyze(scan_result))
     tsx = asyncio.run(generate_ui_component(description, analysis_result))
     typer.echo(tsx)
+    if preview or output_dir:
+        import webbrowser
+
+        from superrobot.pipeline.ui_preview import write_preview
+
+        out = output_dir or path
+        (Path(out) / "ui").mkdir(parents=True, exist_ok=True)
+        (Path(out) / "ui" / "component.tsx").write_text(tsx)
+        preview_path = write_preview(tsx, out)
+        typer.echo(f"\nLive preview: {preview_path}", err=True)
+        if preview:
+            webbrowser.open(f"file://{preview_path}")
 
 
 async def _run_import_headless(repo_path: str, output_dir: str | None, skip_eval: bool) -> None:
@@ -320,7 +379,9 @@ async def _run_import_headless(repo_path: str, output_dir: str | None, skip_eval
     print(json.dumps(generate_payload, indent=2))
 
     if not skip_eval:
-        summary = await run_eval(analysis_result, cwd=str(out))
+        summary = await run_eval(
+            analysis_result, cwd=str(out), entry=_entry_info_from_scan(scan_result)
+        )
         print(json.dumps({"stage": "eval", "result": summary.model_dump()}, indent=2))
 
 

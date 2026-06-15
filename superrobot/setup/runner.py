@@ -15,7 +15,18 @@ from rich.table import Table
 
 from superrobot.dr.cli_wrapper import DrCliWrapper
 from superrobot.env import load_user_env, write_env_file
-from superrobot.setup.checks import SetupCheckResult, run_all_checks
+from superrobot.setup.checks import (
+    SetupCheckResult,
+    auth_matches_endpoint,
+    run_all_checks,
+)
+from superrobot.setup.constants import (
+    DEFAULT_MODEL,
+    ENDPOINT_PRESETS,
+    api_endpoint,
+    endpoint_label,
+    normalize_endpoint,
+)
 from superrobot.setup.state import mark_setup_complete
 
 
@@ -67,20 +78,8 @@ class SetupRunner:
             )
             return result
 
-        # Step 2: Auth
-        c.print("\n[bold]Step 2/4[/] — DataRobot authentication")
-        if not result.auth_ok:
-            c.print("[yellow]Not authenticated.[/] Launching [bold]dr auth login[/]...")
-            login_ok = await self._run_auth_login()
-            if not login_ok:
-                c.print("[red]Authentication failed. Run:[/] dr auth login")
-                return result
-            result.auth_ok = True
-        else:
-            c.print("[green]✓[/] dr auth check passed")
-
-        # Step 3: Environment
-        c.print("\n[bold]Step 3/4[/] — Environment variables")
+        # Step 2: Environment (selected first so auth targets the right URL)
+        c.print("\n[bold]Step 2/4[/] — Environment variables")
         endpoint, token, model = self._prompt_environment()
         write_env_file(
             {
@@ -89,12 +88,30 @@ class SetupRunner:
                 "SUPERROBOT_MODEL": model,
             }
         )
-        os.environ["DATAROBOT_ENDPOINT"] = endpoint
-        os.environ["DATAROBOT_API_TOKEN"] = token
-        os.environ["SUPERROBOT_MODEL"] = model
         result.endpoint_set = True
         result.token_set = True
         c.print("[green]✓[/] Saved to ~/.config/superrobot/.env")
+
+        # Step 3: Auth against the selected environment
+        c.print(f"\n[bold]Step 3/4[/] — DataRobot authentication ({endpoint_label(endpoint)})")
+        needs_login = not result.auth_ok or not auth_matches_endpoint(endpoint)
+        if needs_login:
+            if result.auth_ok:
+                c.print(
+                    f"[yellow]dr is authenticated against a different environment.[/] "
+                    f"Re-authenticating against [bold]{endpoint}[/]..."
+                )
+            else:
+                c.print(
+                    f"[yellow]Not authenticated.[/] Launching [bold]dr auth login {endpoint}[/]..."
+                )
+            login_ok = await self._run_auth_login(endpoint)
+            if not login_ok:
+                c.print(f"[red]Authentication failed. Run:[/] dr auth login {endpoint}")
+                return result
+            result.auth_ok = True
+        else:
+            c.print(f"[green]✓[/] dr auth check passed ({endpoint})")
 
         # Step 4: Gateway verify
         c.print("\n[bold]Step 4/4[/] — LLM Gateway connectivity")
@@ -110,7 +127,7 @@ class SetupRunner:
                 c.print("[green]✓[/] LLM Gateway reachable")
             else:
                 c.print(f"[red]✗[/] Gateway check failed: {result.gateway_error}")
-                c.print("[yellow]You can retry later with:[/] superrobot setup check")
+                c.print("[yellow]You can retry later with:[/] superrobot setup --check")
                 return result
 
         mark_setup_complete(endpoint, model=model)
@@ -141,12 +158,22 @@ class SetupRunner:
     def _prompt_environment(self) -> tuple[str, str, str]:
         c = self.console
         assert c is not None
-        default_endpoint = os.environ.get("DATAROBOT_ENDPOINT", "https://app.datarobot.com")
-        endpoint = Prompt.ask(
-            "DataRobot Platform API URL (NOT prediction URL)",
-            default=default_endpoint,
-            console=c,
-        )
+        c.print("\n[bold]DataRobot environment[/]")
+        c.print("  [1] Production — https://app.datarobot.com")
+        c.print("  [2] Staging    — https://staging.datarobot.com")
+        c.print("  [3] Custom URL")
+        choice = Prompt.ask("Select", choices=["1", "2", "3"], default="1", console=c)
+        if choice == "2":
+            endpoint = ENDPOINT_PRESETS["staging"]
+        elif choice == "3":
+            default_endpoint = os.environ.get("DATAROBOT_ENDPOINT", ENDPOINT_PRESETS["production"])
+            endpoint = Prompt.ask(
+                "DataRobot Platform API URL (NOT prediction URL)",
+                default=default_endpoint,
+                console=c,
+            )
+        else:
+            endpoint = ENDPOINT_PRESETS["production"]
         token = os.environ.get("DATAROBOT_API_TOKEN", "")
         if token:
             use_existing = Confirm.ask(
@@ -159,17 +186,19 @@ class SetupRunner:
             token = Prompt.ask("DataRobot API token", password=True, console=c)
         model = Prompt.ask(
             "LLM model",
-            default=os.environ.get("SUPERROBOT_MODEL", "azure/gpt-4o-2024-11-20"),
+            default=os.environ.get("SUPERROBOT_MODEL", DEFAULT_MODEL),
             console=c,
         )
-        return endpoint.strip(), token.strip(), model.strip()
+        return api_endpoint(endpoint), token.strip(), model.strip()
 
-    async def _run_auth_login(self) -> bool:
-        """Run dr auth login with inherited stdio."""
+    async def _run_auth_login(self, endpoint: str | None = None) -> bool:
+        """Run dr auth login with inherited stdio, targeting the given endpoint URL."""
+        args = ["auth", "login"]
+        if endpoint:
+            args.append(normalize_endpoint(endpoint))
         proc = await asyncio.create_subprocess_exec(
             "dr",
-            "auth",
-            "login",
+            *args,
             stdin=sys.stdin,
             stdout=sys.stdout,
             stderr=sys.stderr,

@@ -8,6 +8,7 @@ dependencies = [
 {% endfor %}
 ]
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+# Dependency manifest for the DR agent bundle — not an installable package.
+# `uv sync` here creates a venv with the agent's dependencies for local eval.
+[tool.uv]
+package = false

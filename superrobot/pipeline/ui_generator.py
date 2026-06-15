@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 
-from superrobot.dr.llm_gateway import LLMGateway
+from superrobot.dr.llm_gateway import LLMGateway, has_llm_credentials
 from superrobot.models.analysis_result import AnalysisResult
 
 CATALOG_PATH = Path(__file__).parent.parent / "dr" / "drui_catalog.json"
@@ -20,7 +20,12 @@ async def generate_ui_component(
     gateway: LLMGateway | None = None,
 ) -> str:
     """Generate a @dr-ui React component from natural language description."""
+    if gateway is None and not has_llm_credentials():
+        return _stub_ui_component(description, analysis)
+
     gw = gateway or LLMGateway()
+    if not gw.available:
+        return _stub_ui_component(description, analysis)
     catalog = CATALOG_PATH.read_text()
     tokens = TOKENS_PATH.read_text()
 
@@ -42,6 +47,20 @@ async def generate_ui_component(
         tsx = _strip_markdown_fences(tsx)
 
     return tsx
+
+
+def _stub_ui_component(description: str, analysis: AnalysisResult) -> str:
+    """Minimal dr-ui placeholder when LLM is unavailable."""
+    inputs = ", ".join(analysis.input_schema.keys()) or "query"
+    return f"""export default function GeneratedPanel() {{
+  return (
+  <Card title="{description[:60]}">
+    <TextInput label="{inputs}" />
+    <Text>Output: response</Text>
+  </Card>
+  );
+}}
+"""
 
 
 def _strip_markdown_fences(text: str) -> str:

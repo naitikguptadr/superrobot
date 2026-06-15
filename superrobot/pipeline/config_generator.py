@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import re
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -54,11 +56,151 @@ def generate_config(
     return config
 
 
+_EXCLUDED_DIR_PARTS = {".venv", "node_modules", ".superrobot", ".git", "__pycache__", "tests"}
+# names the generated bundle already claims
+_RESERVED_MODULES = {"custom", "myagent", "dr_llm"}
+
+# LLM client constructors rewired to the DR LLM Gateway shim (dr_llm.py)
+_LLM_REWRITES = {
+    "ChatOpenAI": "dr_chat_openai",
+    "AzureChatOpenAI": "dr_azure_chat_openai",
+    "AsyncOpenAI": "dr_async_openai",
+    "OpenAI": "dr_openai",
+}
+
+
+def migrate_source_files(repo_path: str | Path) -> dict[str, str]:
+    """Copy the source repo's Python modules into the bundle, DRUM-flattened.
+
+    DRUM merges agent/agent/ into a flat bundle, so tools/search.py becomes
+    search.py and every dotted import of a copied module is rewritten to the
+    flat form. Returns {"agent/agent/<flat>.py": rewritten_source}.
+    """
+    root = Path(repo_path).resolve()
+    if not root.exists():
+        return {}
+
+    sources: dict[str, Path] = {}  # dotted module path -> file
+    for py_file in sorted(root.rglob("*.py")):
+        if any(part in _EXCLUDED_DIR_PARTS for part in py_file.relative_to(root).parts):
+            continue
+        rel = py_file.relative_to(root)
+        dotted = ".".join(rel.with_suffix("").parts)
+        sources[dotted] = py_file
+
+    # dotted module -> flat module name, avoiding collisions and reserved names
+    flat_names: dict[str, str] = {}
+    used: set[str] = set(_RESERVED_MODULES)
+    for dotted in sources:
+        stem = dotted.rsplit(".", maxsplit=1)[-1]
+        flat = stem if stem not in used else dotted.replace(".", "_")
+        while flat in used:
+            flat = f"app_{flat}"
+        used.add(flat)
+        flat_names[dotted] = flat
+
+    migrated: dict[str, str] = {}
+    for dotted, py_file in sources.items():
+        content = py_file.read_text(encoding="utf-8", errors="replace")
+        content = _rewrite_imports(content, flat_names)
+        content = _rewrite_llm_calls(content)
+        migrated[f"agent/agent/{flat_names[dotted]}.py"] = content
+    return migrated
+
+
+def flat_module_name(repo_path: str | Path, entry_file: str) -> str:
+    """Flat module name the entry file gets after migration."""
+    dotted = ".".join(Path(entry_file).with_suffix("").parts)
+    root = Path(repo_path).resolve() if repo_path else None
+    if root and root.exists():
+        migrated = migrate_source_files(root)
+        candidate = Path(entry_file).stem
+        names = {Path(p).stem for p in migrated}
+        if candidate in names:
+            return candidate
+        flat = dotted.replace(".", "_")
+        if flat in names:
+            return flat
+    return Path(entry_file).stem
+
+
+def _rewrite_imports(content: str, flat_names: dict[str, str]) -> str:
+    """Rewrite imports of migrated modules to their flat DRUM names."""
+    for dotted in sorted(flat_names, key=len, reverse=True):
+        flat = flat_names[dotted]
+        if dotted == flat:
+            continue
+        content = re.sub(
+            rf"(^|\n)(\s*)from\s+{re.escape(dotted)}\s+import\s",
+            rf"\1\2from {flat} import ",
+            content,
+        )
+
+        def import_repl(m: re.Match[str], f: str = flat) -> str:
+            return f"{m.group(1)}{m.group(2)}import {f}{m.group(3) or ''}"
+
+        content = re.sub(
+            rf"(^|\n)(\s*)import\s+{re.escape(dotted)}(\s+as\s+\w+)?(?=\s|$)",
+            import_repl,
+            content,
+        )
+    # relative imports become flat too: from .graph import X -> from graph import X
+    content = re.sub(r"(^|\n)(\s*)from\s+\.(\w+)\s+import\s", r"\1\2from \3 import ", content)
+    return content
+
+
+def _rewrite_llm_calls(content: str) -> str:
+    """Rewire LLM client constructor calls through the dr_llm gateway shim.
+
+    ChatOpenAI(...) → dr_chat_openai(...) etc. On DR the shim routes through
+    the DR LLM Gateway; off DR it constructs the original client unchanged.
+    """
+    used: list[str] = []
+    for name, wrapper in _LLM_REWRITES.items():
+        pattern = rf"(?<![\w.]){name}\s*\("
+        if re.search(pattern, content):
+            content = re.sub(pattern, f"{wrapper}(", content)
+            used.append(wrapper)
+    if not used:
+        return content
+
+    import_line = f"from dr_llm import {', '.join(sorted(used))}\n"
+    return _insert_after_docstring(content, import_line)
+
+
+def _insert_after_docstring(content: str, line: str) -> str:
+    """Insert a line after the module docstring (or at the top)."""
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return line + content
+    body = getattr(tree, "body", [])
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        lines = content.splitlines(keepends=True)
+        idx = body[0].end_lineno or 1
+        return "".join(lines[:idx]) + line + "".join(lines[idx:])
+    return line + content
+
+
 def render_files(config: AgentConfig) -> dict[str, str]:
     """Render all Jinja2 templates to a path→content dict."""
     jinja = _env()
     myagent_template = MYAGENT_TEMPLATES[config.dr_framework]
     merged_deps = _merge_dependencies(config.dependencies, config.original_pyproject)
+
+    migrated = migrate_source_files(config.repo_path) if config.repo_path else {}
+    entry_module = (
+        flat_module_name(config.repo_path, config.entry_file)
+        if migrated
+        else Path(config.entry_file).stem
+    )
+
+    from superrobot.setup.constants import DEFAULT_MODEL
 
     ctx = {
         "config": config,
@@ -66,6 +208,10 @@ def render_files(config: AgentConfig) -> dict[str, str]:
         "agent_purpose": config.agent_purpose,
         "entry_file": config.entry_file,
         "entry_function": config.entry_function,
+        "entry_module": entry_module,
+        "entry_params": config.entry_params,
+        "migrated": bool(migrated),
+        "default_model": DEFAULT_MODEL,
         "runtime_param_keys": config.runtime_param_keys,
         "env_vars": config.env_vars,
         "env_var_descriptions": config.env_var_descriptions,
@@ -95,7 +241,7 @@ def render_files(config: AgentConfig) -> dict[str, str]:
         for v in violations:
             warnings.warn(v, stacklevel=2)
 
-    return {
+    files = {
         "agent/agent/custom.py": custom_py,
         "agent/agent/workflow.yaml": workflow,
         "agent/agent/myagent.py": myagent,
@@ -104,6 +250,12 @@ def render_files(config: AgentConfig) -> dict[str, str]:
         ".env.template": env_template,
         "AGENTS.md": agents_md,
     }
+    # migrated business logic ships inside the bundle, DRUM-flat
+    files.update(migrated)
+    if migrated:
+        # gateway shim so the migrated LLM calls run on DR without provider keys
+        files["agent/agent/dr_llm.py"] = jinja.get_template("dr_llm_py.j2").render(**ctx)
+    return files
 
 
 def write_generated_files(files: dict[str, str], output_dir: str | Path) -> Path:

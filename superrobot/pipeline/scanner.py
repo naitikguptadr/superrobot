@@ -34,8 +34,11 @@ def scan(repo_path: str | Path) -> ScanResult:
         msg = f"Repo path does not exist: {root}"
         raise FileNotFoundError(msg)
 
-    py_files = list(root.rglob("*.py"))
-    py_files = [f for f in py_files if ".venv" not in f.parts and "node_modules" not in f.parts]
+    py_files = [
+        f
+        for f in root.rglob("*.py")
+        if not any(part in (".venv", "node_modules", ".superrobot", ".git") for part in f.parts)
+    ]
 
     detected_framework = "unknown"
     has_state_graph = False
@@ -119,37 +122,193 @@ def scan(repo_path: str | Path) -> ScanResult:
     )
 
 
-def build_graph_nodes(repo_path: str | Path) -> list[dict[str, str]]:
-    """Extract graph nodes from AST for the TUI graph panel."""
-    root = Path(repo_path).resolve()
-    nodes: list[dict[str, str]] = [{"id": "input", "label": "Input", "type": "input"}]
+# Constructors / attribute chains that represent an actual LLM client
+_LLM_CONSTRUCTORS = {
+    "ChatOpenAI",
+    "AzureChatOpenAI",
+    "OpenAI",
+    "AsyncOpenAI",
+    "ChatAnthropic",
+    "Anthropic",
+    "ChatVertexAI",
+    "ChatBedrock",
+}
+_MAX_GRAPH_NODES = 12
 
+GraphData = tuple[list[dict[str, str]], list[tuple[str, str]]]
+
+
+def build_graph(repo_path: str | Path) -> GraphData:
+    """Build the agent execution graph (nodes + edges) for the TUI graph panel.
+
+    LangGraph repos get the real graph from StateGraph add_node/add_edge calls.
+    Everything else gets a heuristic flow: Input → entry point → LLM clients /
+    @tool functions / memory components → Output.
+    """
+    root = Path(repo_path).resolve()
+    trees: list[ast.AST] = []
     for py_file in root.rglob("*.py"):
-        if ".venv" in py_file.parts:
+        if any(part in (".venv", "node_modules", ".superrobot", ".git") for part in py_file.parts):
             continue
         try:
-            source = py_file.read_text(encoding="utf-8", errors="replace")
-            tree = ast.parse(source)
+            trees.append(ast.parse(py_file.read_text(encoding="utf-8", errors="replace")))
         except (OSError, SyntaxError):
             continue
 
+    for tree in trees:
+        state_graph = _extract_stategraph(tree)
+        if state_graph is not None:
+            return state_graph
+
+    return _heuristic_graph(trees)
+
+
+def build_graph_nodes(repo_path: str | Path) -> list[dict[str, str]]:
+    """Nodes-only view of build_graph (kept for callers that infer edges)."""
+    return build_graph(repo_path)[0]
+
+
+def _extract_stategraph(tree: ast.AST) -> GraphData | None:
+    """Recover the real graph from StateGraph add_node / add_edge calls."""
+    node_names: list[str] = []
+    edges: list[tuple[str, str]] = []
+    routers: set[str] = set()
+
+    def edge_endpoint(arg: ast.expr) -> str | None:
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            return arg.value
+        if isinstance(arg, ast.Name) and arg.id in ("START", "END"):
+            return arg.id
+        return None
+
+    # routing functions return node names as string constants — collect them so
+    # add_conditional_edges(src, fn) can be resolved to real edges
+    returns_by_func: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            returned: set[str] = set()
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Return) and sub.value is not None:
+                    # walk the whole expression: handles ternaries, dict lookups
+                    for expr in ast.walk(sub.value):
+                        if isinstance(expr, ast.expr):
+                            target = edge_endpoint(expr)
+                            if target:
+                                returned.add(target)
+            returns_by_func[node.name] = returned
+
+    def conditional_targets(call: ast.Call) -> set[str]:
+        targets: set[str] = set()
+        for arg in call.args[1:]:
+            if isinstance(arg, ast.Name) and arg.id in returns_by_func:
+                targets.update(returns_by_func[arg.id])
+            elif isinstance(arg, ast.Dict):  # path map {"key": "node"}
+                for value in arg.values:
+                    target = edge_endpoint(value)
+                    if target:
+                        targets.add(target)
+        return targets
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        method = node.func.attr
+        if method == "add_node" and node.args:
+            name = edge_endpoint(node.args[0])
+            if name:
+                node_names.append(name)
+        elif method == "add_edge" and len(node.args) >= 2:
+            src, dst = edge_endpoint(node.args[0]), edge_endpoint(node.args[1])
+            if src and dst:
+                edges.append((src, dst))
+        elif method == "add_conditional_edges" and node.args:
+            src = edge_endpoint(node.args[0])
+            if src:
+                routers.add(src)
+                for target in conditional_targets(node):
+                    if target != src:
+                        edges.append((src, target))
+        elif method == "set_entry_point" and node.args:
+            name = edge_endpoint(node.args[0])
+            if name:
+                edges.append(("START", name))
+
+    if not node_names:
+        return None
+
+    nodes = [{"id": "input", "label": "Input", "type": "input"}]
+    for name in dict.fromkeys(node_names):
+        node_type = "router" if name in routers else "llm_call"
+        nodes.append({"id": name, "label": name, "type": node_type})
+    nodes.append({"id": "output", "label": "Output", "type": "output"})
+
+    renamed = [
+        (
+            src.replace("START", "input").replace("END", "output"),
+            dst.replace("START", "input").replace("END", "output"),
+        )
+        for src, dst in edges
+    ]
+    known = {n["id"] for n in nodes}
+    graph_edges = [(s, d) for s, d in renamed if s in known and d in known]
+    return nodes, graph_edges
+
+
+def _heuristic_graph(trees: list[ast.AST]) -> GraphData:
+    """Input → entry function → LLM / tools / memory → Output."""
+    entry: str | None = None
+    llm_labels: list[str] = []
+    tool_labels: list[str] = []
+    memory_labels: list[str] = []
+
+    for tree in trees:
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                label = _call_label(node, source)
-                if label:
-                    node_type = "llm_call" if any(p in label for p in LLM_PATTERNS) else "tool"
-                    if any(p in source for p in TOOL_PATTERNS):
-                        node_type = "tool"
-                    nodes.append(
-                        {
-                            "id": f"{py_file.stem}_{label}",
-                            "label": label[:30],
-                            "type": node_type,
-                        }
-                    )
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if entry is None and (
+                    node.name in ENTRY_POINT_NAMES or node.name.startswith("run_")
+                ):
+                    entry = node.name
+                for decorator in node.decorator_list:
+                    dec = decorator.func if isinstance(decorator, ast.Call) else decorator
+                    dec_name = getattr(dec, "attr", None) or getattr(dec, "id", None)
+                    if dec_name == "tool":
+                        tool_labels.append(node.name)
+            elif isinstance(node, ast.Call):
+                name = None
+                if isinstance(node.func, ast.Name):
+                    name = node.func.id
+                elif isinstance(node.func, ast.Attribute):
+                    name = node.func.attr
+                if not name:
+                    continue
+                if name in _LLM_CONSTRUCTORS:
+                    llm_labels.append(name)
+                elif "Memory" in name:
+                    memory_labels.append(name)
+
+    nodes: list[dict[str, str]] = [{"id": "input", "label": "Input", "type": "input"}]
+    edges: list[tuple[str, str]] = []
+    previous = "input"
+    if entry:
+        nodes.append({"id": entry, "label": f"{entry}()", "type": "router"})
+        edges.append(("input", entry))
+        previous = entry
+
+    middle: list[tuple[str, str]] = [(label, "llm_call") for label in dict.fromkeys(llm_labels)]
+    middle += [(label, "tool") for label in dict.fromkeys(tool_labels)]
+    middle += [(label, "memory_read") for label in dict.fromkeys(memory_labels)]
+    middle = middle[: _MAX_GRAPH_NODES - len(nodes) - 1]
+
+    for label, node_type in middle:
+        nodes.append({"id": label, "label": label, "type": node_type})
+        edges.append((previous, label))
+    for label, _ in middle:
+        edges.append((label, "output"))
+    if not middle:
+        edges.append((previous, "output"))
 
     nodes.append({"id": "output", "label": "Output", "type": "output"})
-    return nodes
+    return nodes, edges
 
 
 def _read_dependencies(root: Path) -> list[str]:
@@ -215,11 +374,3 @@ def _compute_confidence(
     if entry_points:
         base = min(1.0, base + 0.1)
     return base
-
-
-def _call_label(node: ast.Call, source: str) -> str | None:
-    if isinstance(node.func, ast.Attribute):
-        return node.func.attr
-    if isinstance(node.func, ast.Name):
-        return node.func.id
-    return None

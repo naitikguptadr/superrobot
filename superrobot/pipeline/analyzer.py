@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from superrobot.dr.framework_mapper import map_framework
-from superrobot.dr.llm_gateway import LLMGateway
+from superrobot.dr.llm_gateway import LLMGateway, has_llm_credentials
 from superrobot.models.analysis_result import AnalysisResult
 from superrobot.models.scan_result import ScanResult
 
@@ -15,7 +15,13 @@ async def analyze(
     gateway: LLMGateway | None = None,
 ) -> AnalysisResult:
     """Analyze a ScanResult via LLM Gateway, with framework mapper fallback."""
+    if gateway is None and not has_llm_credentials():
+        return _fallback_analysis(scan_result)
+
     gw = gateway or LLMGateway()
+    if not gw.available:
+        return _fallback_analysis(scan_result)
+
     user_content = json.dumps(scan_result.model_dump(), indent=2)
 
     try:

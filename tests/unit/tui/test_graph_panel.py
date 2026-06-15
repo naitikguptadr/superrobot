@@ -21,7 +21,7 @@ def test_compute_depth() -> None:
 
 
 def test_render_dag_empty() -> None:
-    assert "No graph data" in _render_dag([], [])
+    assert "Scanning will populate" in _render_dag([], [])
 
 
 def test_render_dag_with_nodes() -> None:

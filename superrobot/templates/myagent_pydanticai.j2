@@ -6,6 +6,11 @@ from typing import Any
 import datarobot as dr
 from datarobot_genai import PydanticAIAgent  # verify import path against recipe-datarobot-agent-templates
 
+{% if migrated %}import inspect
+
+from {{ entry_module }} import {{ entry_function }}  # migrated source (flat DRUM import)
+
+{% endif %}
 
 class MyAgent(PydanticAIAgent):
     """Generated Pydantic AI agent."""
@@ -20,6 +25,15 @@ class MyAgent(PydanticAIAgent):
         return template.get_latest_version().to_fstring()
 
     async def process(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Process input and return structured output."""
+        """Process input by delegating to the migrated agent logic."""
+{% if migrated %}        kwargs = {k: v for k, v in payload.items() if k in {{ entry_params }}}
+        result = {{ entry_function }}(**kwargs) if kwargs else {{ entry_function }}(payload)
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, dict):
+            return result
+        return {"response": str(result)}
+{% else %}        # TODO: migrate logic from {{ entry_file }}::{{ entry_function }}
         result = await self.run_agent(payload)
         return {"response": str(result)}
+{% endif %}

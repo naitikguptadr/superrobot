@@ -10,47 +10,102 @@ Screen {
     padding: 0 1;
 }
 
-#main-grid {
-    layout: grid;
-    grid-size: 2 2;
-    grid-rows: 1fr 1fr;
-    grid-columns: 1fr 2fr;
+#action-bar {
+    height: 1;
+    padding: 0 1;
+    margin-bottom: 1;
 }
 
-#pipeline-panel {
-    border: solid $primary;
-    padding: 1;
+#action-bar.action-ready {
+    background: $accent 25%;
+    color: $text;
 }
 
-#graph-panel {
-    border: solid $accent;
-    padding: 1;
-}
-
-#copilot-panel {
-    border: solid $warning;
-    padding: 1;
-}
-
-#config-panel {
-    border: solid $success;
-    padding: 1;
-}
-
-.pipeline-step-done {
-    color: $success;
-}
-
-.pipeline-step-active {
-    color: $accent;
-}
-
-.pipeline-step-pending {
+#action-bar.action-working {
+    background: $panel;
     color: $text-muted;
 }
 
-.pipeline-step-failed {
-    color: $error;
+#main-grid {
+    layout: grid;
+    grid-size: 2 2;
+    /* top row hugs its content; bottom row takes the rest */
+    grid-rows: auto 1fr;
+    grid-columns: 1fr 2fr;
+    grid-gutter: 0 1;
+    height: 1fr;
+    padding: 0 1;
+}
+
+#pipeline-panel, #graph-panel, #copilot-panel, #config-panel {
+    width: 100%;
+    border: round $panel-lighten-2;
+    border-title-color: $text;
+    border-title-style: bold;
+    padding: 1;
+    background: $surface;
+}
+
+#copilot-panel, #config-panel {
+    height: 100%;
+}
+
+#pipeline-panel, #graph-panel {
+    height: auto;
+    max-height: 18;
+}
+
+#pipeline-panel {
+    border: round $primary;
+}
+
+#graph-panel {
+    overflow: auto auto;
+    scrollbar-size: 1 1;
+}
+
+#graph-stats {
+    color: $text-muted;
+    margin-top: 1;
+}
+
+#copilot-log {
+    height: 1fr;
+    scrollbar-size: 1 1;
+}
+
+#copilot-stream {
+    height: auto;
+    max-height: 50%;
+    color: $text-muted;
+}
+
+#config-panel TabbedContent {
+    height: 1fr;
+}
+
+#config-panel TabPane {
+    overflow-y: auto;
+    scrollbar-size: 1 1;
+}
+
+#eval-panel {
+    display: none;
+    height: 10;
+    border: round $panel-lighten-2;
+    border-title-color: $text;
+    border-title-style: bold;
+    padding: 0 1;
+    margin: 0 1;
+}
+
+#eval-table {
+    height: 1fr;
+    scrollbar-size: 1 1;
+}
+
+#eval-summary {
+    height: 1;
 }
 
 .node-valid {

@@ -111,7 +111,7 @@ client = AsyncOpenAI(
 )
 ```
 
-Default model: `azure/gpt-5.4`. Override via `SUPERROBOT_MODEL` env var.
+Default model: `azure/gpt-5-5-2026-04-23`. Override via `SUPERROBOT_MODEL` env var.
 All LLM calls are async. Retry: 3 attempts, exponential backoff, 2s base.
 
 ### Auth Flow
@@ -768,7 +768,7 @@ docs(claude): add A2A sequential execution rule
 |---|---|---|
 | `DATAROBOT_API_TOKEN` | Yes | DR API token; used for LLM Gateway + dr auth |
 | `DATAROBOT_ENDPOINT` | Yes | Platform API URL (NOT prediction URL) |
-| `SUPERROBOT_MODEL` | No | LLM model override (default: `azure/gpt-4o-2024-11-20`) |
+| `SUPERROBOT_MODEL` | No | LLM model override (default: `azure/gpt-5-5-2026-04-23`) |
 | `SUPERROBOT_DEBUG` | No | `1` = verbose LLM call logging to stderr |
 | `SUPERROBOT_SKIP_EVAL` | No | `1` = skip pre-deploy eval (not recommended) |
 

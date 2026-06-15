@@ -1,9 +1,26 @@
 """Merged config ready for Jinja2 templating."""
 
+import re
+
 from pydantic import BaseModel, Field
 
 from superrobot.models.analysis_result import AnalysisResult, DrFramework
 from superrobot.models.scan_result import ScanResult
+
+_SIGNATURE = re.compile(r"def\s+\w+\((?P<args>[^)]*)\)")
+
+
+def parse_signature_params(signature: str) -> list[str]:
+    """Extract parameter names from a scanned signature string."""
+    match = _SIGNATURE.search(signature or "")
+    if not match:
+        return []
+    params = []
+    for raw in match.group("args").split(","):
+        name = raw.split(":")[0].split("=")[0].strip()
+        if name and name not in ("self", "cls", "*", "/"):
+            params.append(name.lstrip("*"))
+    return params
 
 
 class AgentConfig(BaseModel):
@@ -14,6 +31,8 @@ class AgentConfig(BaseModel):
     dr_framework: DrFramework = DrFramework.LANGGRAPH
     entry_file: str = "main.py"
     entry_function: str = "run_agent"
+    entry_params: list[str] = Field(default_factory=list)
+    repo_path: str = ""
     dependencies: list[str] = Field(default_factory=list)
     env_vars: list[str] = Field(default_factory=list)
     env_var_descriptions: dict[str, str] = Field(default_factory=dict)
@@ -38,6 +57,8 @@ class AgentConfig(BaseModel):
             dr_framework=analysis.dr_framework,
             entry_file=entry.file if entry else "main.py",
             entry_function=entry.function if entry else "run_agent",
+            entry_params=parse_signature_params(entry.signature) if entry else [],
+            repo_path=scan.repo_path,
             dependencies=scan.dependencies,
             env_vars=env_vars,
             env_var_descriptions={var: f"Required for {var}" for var in env_vars},

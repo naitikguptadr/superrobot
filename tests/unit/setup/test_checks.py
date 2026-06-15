@@ -1,6 +1,17 @@
 """Setup checks unit tests."""
 
-from superrobot.setup.checks import PrerequisiteStatus, SetupCheckResult, check_prerequisites
+from pathlib import Path
+
+import pytest
+
+from superrobot.setup import checks
+from superrobot.setup.checks import (
+    PrerequisiteStatus,
+    SetupCheckResult,
+    auth_matches_endpoint,
+    check_prerequisites,
+    dr_config_endpoint,
+)
 
 
 def test_check_prerequisites_returns_all_binaries() -> None:
@@ -23,3 +34,39 @@ def test_setup_check_result_ready_when_all_ok() -> None:
         gateway_ok=True,
     )
     assert result.is_ready
+
+
+def test_dr_config_endpoint_missing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(checks, "DR_CONFIG_FILE", tmp_path / "drconfig.yaml")
+    assert dr_config_endpoint() is None
+
+
+def test_dr_config_endpoint_reads_and_normalizes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "drconfig.yaml"
+    cfg.write_text("endpoint: https://staging.datarobot.com/api/v2\ntoken: abc\n")
+    monkeypatch.setattr(checks, "DR_CONFIG_FILE", cfg)
+    assert dr_config_endpoint() == "https://staging.datarobot.com"
+
+
+def test_dr_config_endpoint_malformed_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = tmp_path / "drconfig.yaml"
+    cfg.write_text("[: not yaml ::")
+    monkeypatch.setattr(checks, "DR_CONFIG_FILE", cfg)
+    assert dr_config_endpoint() is None
+
+
+def test_auth_matches_endpoint_unknown_config_is_permissive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(checks, "DR_CONFIG_FILE", tmp_path / "missing.yaml")
+    assert auth_matches_endpoint("https://staging.datarobot.com")
+
+
+def test_auth_matches_endpoint_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = tmp_path / "drconfig.yaml"
+    cfg.write_text("endpoint: https://app.datarobot.com/api/v2\n")
+    monkeypatch.setattr(checks, "DR_CONFIG_FILE", cfg)
+    assert not auth_matches_endpoint("https://staging.datarobot.com")
+    assert auth_matches_endpoint("https://app.datarobot.com/")

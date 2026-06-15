@@ -9,6 +9,7 @@ import yaml
 from pydantic import BaseModel
 
 from superrobot.env import STATE_FILE, ensure_config_dir
+from superrobot.setup.constants import DEFAULT_MODEL
 
 SETUP_VERSION = "1"
 
@@ -22,7 +23,7 @@ class SetupState(BaseModel):
     prerequisites_ok: bool = False
     auth_ok: bool = False
     gateway_ok: bool = False
-    model: str = "azure/gpt-4o-2024-11-20"
+    model: str = DEFAULT_MODEL
 
     @property
     def is_complete(self) -> bool:
@@ -61,7 +62,7 @@ def mark_setup_complete(
     prerequisites_ok: bool = True,
     auth_ok: bool = True,
     gateway_ok: bool = True,
-    model: str = "azure/gpt-4o-2024-11-20",
+    model: str = DEFAULT_MODEL,
 ) -> SetupState:
     """Mark setup as complete and persist."""
     state = SetupState(

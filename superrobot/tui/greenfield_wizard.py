@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Label, RadioButton, RadioSet, Static
@@ -24,6 +25,9 @@ class GreenfieldSpec:
 
 class GreenfieldWizard(ModalScreen[GreenfieldSpec | None]):
     """Three-question greenfield wizard."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    AUTO_FOCUS = "#purpose"
 
     DEFAULT_CSS = """
     GreenfieldWizard {
@@ -60,12 +64,16 @@ class GreenfieldWizard(ModalScreen[GreenfieldSpec | None]):
         if isinstance(first, RadioButton):
             first.value = True
 
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel-btn":
             self.dismiss(None)
             return
         purpose = self.query_one("#purpose", Input).value.strip()
         if not purpose:
+            self.notify("Describe what your agent does first", severity="warning")
             return
         tools = [skill for skill in DR_SKILLS if self.query_one(f"#skill-{skill}", Checkbox).value]
         framework_set = self.query_one("#framework-set", RadioSet)

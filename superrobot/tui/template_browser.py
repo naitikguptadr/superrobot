@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Static
 
@@ -17,14 +18,34 @@ class DrTemplate:
     name: str
     description: str
     framework: str = ""
+    template_id: str = ""
+
+
+_ID_NAME_LINE = re.compile(r"^ID:\s*(?P<id>\S+)\s+Name:\s*(?P<name>.+)$")
 
 
 def parse_templates_list(stdout: str) -> list[DrTemplate]:
-    """Parse dr templates list output into structured entries."""
+    """Parse dr templates list output into structured entries.
+
+    dr v0.2.x emits one `ID: <id>\\tName: <name>` line per template, preceded
+    by an INFO header. Older/other formats fall back to column splitting.
+    """
     templates: list[DrTemplate] = []
     for line in stdout.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("-") and "name" in stripped.lower():
+        if not stripped or stripped.startswith(("INFO", "WARN", "ERROR")):
+            continue
+        id_name = _ID_NAME_LINE.match(stripped)
+        if id_name:
+            templates.append(
+                DrTemplate(
+                    name=id_name.group("name").strip(),
+                    description="",
+                    template_id=id_name.group("id").strip(),
+                )
+            )
+            continue
+        if stripped.startswith("-") and "name" in stripped.lower():
             continue
         # Try tab or multi-space separated: name  description  framework
         parts = re.split(r"\s{2,}|\t", stripped)
@@ -46,6 +67,8 @@ def parse_templates_list(stdout: str) -> list[DrTemplate]:
 
 class TemplateBrowser(ModalScreen[DrTemplate | None]):
     """Browsable table of DR templates."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
     DEFAULT_CSS = """
     TemplateBrowser {
@@ -80,6 +103,16 @@ class TemplateBrowser(ModalScreen[DrTemplate | None]):
         if event.button.id == "cancel-btn":
             self.dismiss(None)
             return
+        self._select_current_row()
+
+    def on_data_table_row_selected(self, _event: DataTable.RowSelected) -> None:
+        """Enter on a table row selects the template."""
+        self._select_current_row()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _select_current_row(self) -> None:
         table = self.query_one("#template-table", DataTable)
         if table.cursor_row is None:
             return

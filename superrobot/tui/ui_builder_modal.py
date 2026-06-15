@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
 
 class UIBuilderModal(ModalScreen[str | None]):
     """Modal for describing a dr-ui component to generate."""
+
+    BINDINGS = [Binding("escape", "skip", "Skip")]
+    AUTO_FOCUS = "#ui-description"
 
     DEFAULT_CSS = """
     UIBuilderModal {
@@ -36,3 +40,10 @@ class UIBuilderModal(ModalScreen[str | None]):
             self.dismiss(desc if desc else None)
         elif event.button.id == "skip-btn":
             self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter in the description field generates (empty = skip)."""
+        self.dismiss(event.value or None)
+
+    def action_skip(self) -> None:
+        self.dismiss(None)

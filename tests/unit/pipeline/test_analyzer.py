@@ -33,6 +33,19 @@ def test_fallback_analysis_unknown_framework() -> None:
 
 
 @pytest.mark.asyncio
+async def test_analyze_uses_fallback_without_credentials(
+    sample_scan: ScanResult,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DATAROBOT_API_TOKEN", raising=False)
+    monkeypatch.delenv("DATAROBOT_ENDPOINT", raising=False)
+    result = await analyze(sample_scan)
+    assert isinstance(result, AnalysisResult)
+    assert result.dr_framework == DrFramework.CREWAI
+    assert "LLM unavailable" in result.notes
+
+
+@pytest.mark.asyncio
 async def test_analyze_uses_fallback_on_llm_failure(
     sample_scan: ScanResult,
     mocker: MockerFixture,

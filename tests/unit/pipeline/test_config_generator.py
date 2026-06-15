@@ -1,63 +1,131 @@
-"""Config generator snapshot tests."""
+"""Config generator tests — logic migration and rendering."""
+
+from __future__ import annotations
 
 from pathlib import Path
 
-from superrobot.models.analysis_result import AnalysisResult, DrFramework
-from superrobot.models.scan_result import ScanResult
+from superrobot.models.agent_config import AgentConfig, parse_signature_params
+from superrobot.models.analysis_result import DrFramework
 from superrobot.pipeline.config_generator import (
-    generate_config,
+    flat_module_name,
+    migrate_source_files,
     render_files,
-    write_generated_files,
 )
 
-FIXTURES = Path(__file__).parent.parent.parent / "fixtures"
+
+def test_parse_signature_params() -> None:
+    assert parse_signature_params("async def run_agent(query)") == ["query"]
+    assert parse_signature_params("def run(self, query: str, k: int = 3)") == ["query", "k"]
+    assert parse_signature_params("") == []
 
 
-def _make_config(
-    framework: DrFramework = DrFramework.LANGGRAPH,
-) -> tuple[ScanResult, AnalysisResult]:
-    scan = ScanResult(
-        detected_framework="langchain",
-        env_vars=["OPENAI_API_KEY", "PROMPT_TEMPLATE_ID"],
-        dependencies=["langchain", "openai"],
-        confidence=0.9,
-        repo_path=str(FIXTURES / "langchain_agent"),
+def _make_repo(tmp_path: Path) -> Path:
+    (tmp_path / "main.py").write_text(
+        "from tools.search import web_search\n\n"
+        "async def run_agent(query):\n"
+        "    return {'response': await web_search(query)}\n"
     )
-    analysis = AnalysisResult(
-        agent_purpose="Research agent",
-        dr_framework=framework,
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "search.py").write_text("async def web_search(q):\n    return q\n")
+    return tmp_path
+
+
+def test_migrate_source_files_flattens_and_rewrites_imports(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    migrated = migrate_source_files(repo)
+    assert "agent/agent/main.py" in migrated
+    assert "agent/agent/search.py" in migrated  # tools/search.py flattened
+    # nested import rewritten to flat DRUM form
+    assert "from search import web_search" in migrated["agent/agent/main.py"]
+    assert "from tools.search" not in migrated["agent/agent/main.py"]
+
+
+def test_migrate_skips_output_and_junk_dirs(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    (repo / ".superrobot").mkdir()
+    (repo / ".superrobot" / "junk.py").write_text("x = 1\n")
+    (repo / ".venv").mkdir()
+    (repo / ".venv" / "lib.py").write_text("x = 1\n")
+    migrated = migrate_source_files(repo)
+    assert not any("junk" in p or "lib" in p for p in migrated)
+
+
+def test_render_files_wires_entry_point(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    config = AgentConfig(
+        agent_purpose="test agent",
+        dr_framework=DrFramework.LANGGRAPH,
+        entry_file="main.py",
+        entry_function="run_agent",
+        entry_params=["query"],
+        repo_path=str(repo),
         input_schema={"query": "str"},
         output_schema={"response": "str"},
-        confidence=0.9,
     )
-    return scan, analysis
-
-
-def test_render_files_happy_path() -> None:
-    scan, analysis = _make_config()
-    config = generate_config(scan, analysis, agent_name="research-agent")
     files = render_files(config)
-    assert "agent/agent/custom.py" in files
-    assert "agent/agent/myagent.py" in files
-    assert "OPENAI_API_KEY" in files["agent/agent/custom.py"]
-    assert "PROMPT_TEMPLATE_ID" in files["agent/agent/myagent.py"]
-    assert "from datarobot_genai import LangGraphAgent" in files["agent/agent/myagent.py"]
+    myagent = files["agent/agent/myagent.py"]
+    assert "from main import run_agent" in myagent
+    assert "TODO" not in myagent
+    assert "agent/agent/main.py" in files  # logic migrated into bundle
+    assert "agent/agent/search.py" in files
 
 
-def test_render_files_all_frameworks() -> None:
-    for framework in DrFramework:
-        scan, analysis = _make_config(framework)
-        analysis.dr_framework = framework
-        config = generate_config(scan, analysis)
-        files = render_files(config)
-        assert "agent/agent/myagent.py" in files
-        assert len(files) == 7
-
-
-def test_write_generated_files(tmp_path: Path) -> None:
-    scan, analysis = _make_config()
-    config = generate_config(scan, analysis)
+def test_render_files_without_repo_keeps_todo() -> None:
+    config = AgentConfig(dr_framework=DrFramework.LANGGRAPH)
     files = render_files(config)
-    out = write_generated_files(files, tmp_path)
-    assert (out / "agent/agent/custom.py").exists()
-    assert (out / "pyproject.toml").exists()
+    assert "TODO" in files["agent/agent/myagent.py"]
+
+
+def test_flat_module_name(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    assert flat_module_name(repo, "main.py") == "main"
+    assert flat_module_name(repo, "tools/search.py") == "search"
+
+
+def test_llm_calls_rewired_to_gateway_shim(tmp_path: Path) -> None:
+    """ChatOpenAI call sites route through dr_llm so they run on DR Gateway."""
+    (tmp_path / "main.py").write_text(
+        '"""Agent."""\n'
+        "from langchain_openai import ChatOpenAI\n\n"
+        "async def run_agent(query):\n"
+        "    llm = ChatOpenAI(model='gpt-4o')\n"
+        "    return {'response': str(await llm.ainvoke(query))}\n"
+    )
+    migrated = migrate_source_files(tmp_path)
+    main = migrated["agent/agent/main.py"]
+    assert "dr_chat_openai(model='gpt-4o')" in main
+    assert "from dr_llm import dr_chat_openai" in main
+    # import line inserted AFTER the module docstring
+    assert main.startswith('"""Agent."""')
+    # the original import survives untouched (shim imports lazily from it)
+    assert "from langchain_openai import ChatOpenAI" in main
+
+
+def test_llm_rewrite_does_not_touch_unrelated_names(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "class MyOpenAIHelper:\n    pass\n\ndef run(q):\n    return {'response': q}\n"
+    )
+    migrated = migrate_source_files(tmp_path)
+    content = migrated["agent/agent/main.py"]
+    assert "dr_openai" not in content
+    assert "dr_llm" not in content
+
+
+def test_bundle_includes_gateway_shim_when_migrated(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from openai import AsyncOpenAI\n\n"
+        "async def run_agent(query):\n"
+        "    client = AsyncOpenAI()\n"
+        "    return {'response': query}\n"
+    )
+    config = AgentConfig(
+        dr_framework=DrFramework.LANGGRAPH,
+        entry_file="main.py",
+        entry_function="run_agent",
+        entry_params=["query"],
+        repo_path=str(tmp_path),
+    )
+    files = render_files(config)
+    assert "agent/agent/dr_llm.py" in files
+    assert "genai/llmgw" in files["agent/agent/dr_llm.py"]
+    assert "dr_async_openai(" in files["agent/agent/main.py"]

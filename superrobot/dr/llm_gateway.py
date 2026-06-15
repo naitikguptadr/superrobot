@@ -15,9 +15,20 @@ from pydantic import BaseModel, ValidationError
 
 T = TypeVar("T", bound=BaseModel)
 
-DEFAULT_MODEL = "azure/gpt-4o-2024-11-20"
+DEFAULT_MODEL = "azure/gpt-5-5-2026-04-23"
 MAX_RETRIES = 3
 BASE_DELAY = 2.0
+
+
+def has_llm_credentials() -> bool:
+    """True when DR platform endpoint and API token are configured."""
+    endpoint = os.environ.get("DATAROBOT_ENDPOINT", "").strip()
+    token = os.environ.get("DATAROBOT_API_TOKEN", "").strip()
+    return bool(endpoint and token)
+
+
+class LLMCredentialsError(Exception):
+    """Raised when LLM Gateway is used without credentials."""
 
 
 class LLMOutputValidationError(Exception):
@@ -32,14 +43,31 @@ class LLMGateway:
     """DR LLM Gateway client with retries and structured output validation."""
 
     def __init__(self, model: str | None = None) -> None:
-        endpoint = os.environ.get("DATAROBOT_ENDPOINT", "")
-        token = os.environ.get("DATAROBOT_API_TOKEN", "")
+        from superrobot.setup.constants import normalize_endpoint
+
+        self._endpoint = normalize_endpoint(os.environ.get("DATAROBOT_ENDPOINT", ""))
+        self._token = os.environ.get("DATAROBOT_API_TOKEN", "").strip()
         self._model = model or os.environ.get("SUPERROBOT_MODEL", DEFAULT_MODEL)
         self._debug = os.environ.get("SUPERROBOT_DEBUG", "") == "1"
-        self._client = AsyncOpenAI(
-            base_url=f"{endpoint}/api/v2/genai/llmgw",
-            api_key=token,
-        )
+        self._client: AsyncOpenAI | None = None
+        if has_llm_credentials():
+            self._client = AsyncOpenAI(
+                base_url=f"{self._endpoint}/api/v2/genai/llmgw",
+                api_key=self._token,
+            )
+
+    @property
+    def available(self) -> bool:
+        """Whether the gateway client was constructed with credentials."""
+        return self._client is not None
+
+    def _require_client(self) -> AsyncOpenAI:
+        if self._client is None:
+            raise LLMCredentialsError(
+                "DATAROBOT_ENDPOINT and DATAROBOT_API_TOKEN are required for LLM calls. "
+                "Run: superrobot setup"
+            )
+        return self._client
 
     def load_prompt(self, name: str) -> str:
         """Load a prompt template from superrobot/dr/prompts/."""
@@ -89,6 +117,8 @@ class LLMGateway:
 
     async def ping(self) -> bool:
         """Minimal gateway connectivity check."""
+        if self._client is None:
+            return False
         try:
             response = await self._client.chat.completions.create(
                 model=self._model,
@@ -101,12 +131,13 @@ class LLMGateway:
 
     async def stream_text(self, prompt_name: str, user_content: str) -> AsyncIterator[str]:
         """Stream raw text from LLM Gateway."""
+        client = self._require_client()
         system = self.load_prompt(prompt_name)
         messages: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": system},
             {"role": "user", "content": user_content},
         ]
-        stream = await self._client.chat.completions.create(
+        stream = await client.chat.completions.create(
             model=self._model,
             messages=messages,
             stream=True,
@@ -138,14 +169,15 @@ class LLMGateway:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
+        client = self._require_client()
         if json_mode:
-            response = await self._client.chat.completions.create(
+            response = await client.chat.completions.create(
                 model=self._model,
                 messages=messages,
                 response_format={"type": "json_object"},
             )
         else:
-            response = await self._client.chat.completions.create(
+            response = await client.chat.completions.create(
                 model=self._model,
                 messages=messages,
             )

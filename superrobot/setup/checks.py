@@ -6,9 +6,15 @@ import os
 import platform
 import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
 
 from superrobot.dr.cli_wrapper import DrCliWrapper
+from superrobot.setup.constants import normalize_endpoint
 from superrobot.startup import REQUIRED_BINARIES, _install_hint
+
+DR_CONFIG_FILE = Path.home() / ".config" / "datarobot" / "drconfig.yaml"
 
 
 @dataclass
@@ -61,6 +67,35 @@ async def check_auth(cli: DrCliWrapper | None = None) -> bool:
     """Check dr CLI authentication."""
     wrapper = cli or DrCliWrapper()
     return await wrapper.auth_check()
+
+
+def dr_config_endpoint() -> str | None:
+    """Endpoint the dr CLI is currently authenticated against, if determinable.
+
+    Reads ~/.config/datarobot/drconfig.yaml (owned by the dr CLI). Returns None
+    when the file is missing or its shape is unrecognized — callers must treat
+    None as "unknown", not as a mismatch.
+    """
+    if not DR_CONFIG_FILE.exists():
+        return None
+    try:
+        data = yaml.safe_load(DR_CONFIG_FILE.read_text())
+    except (yaml.YAMLError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    endpoint = data.get("endpoint")
+    if not isinstance(endpoint, str) or not endpoint.strip():
+        return None
+    return normalize_endpoint(endpoint)
+
+
+def auth_matches_endpoint(selected_endpoint: str) -> bool:
+    """True when dr auth targets the selected environment (or target is unknown)."""
+    configured = dr_config_endpoint()
+    if configured is None:
+        return True
+    return configured == normalize_endpoint(selected_endpoint)
 
 
 def check_env_vars() -> tuple[bool, bool]:

@@ -4,10 +4,23 @@ Use DR design tokens from the token list provided.
 Wire inputs to the provided agent schema.
 Return ONLY valid TypeScript JSX. No markdown. No explanation.
 
+Component contract rules — follow exactly:
+- TextInput onChange receives the NEW STRING VALUE directly, exactly as the catalog
+  example shows: onChange={setQuery}. NEVER write onChange={(e) => setQuery(e.target.value)}.
+- All state starts EMPTY (empty strings, empty arrays). Never seed demo data into
+  initial useState values, and never invoke handlers during render or in useEffect —
+  results must only appear after the user interacts.
+- Every value rendered into JSX must be a string or number. Never render an object
+  directly; format it first.
+- Use only props listed in the catalog for each component.
+
 Negative example (do NOT do this):
 ```tsx
 // Here's a component...
-export default function Bad() { return <div>hello</div>; }
+export default function Bad() {
+  const [q, setQ] = useState({ text: 'preloaded' });   // object state, seeded data
+  return <TextInput value={q} onChange={(e) => setQ(e.target.value)} />;  // wrong contract
+}
 ```
 
 Return raw TSX only.

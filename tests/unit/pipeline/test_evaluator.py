@@ -1,53 +1,77 @@
-"""Evaluator unit tests with mocked dr CLI."""
+"""Evaluator tests — direct-execution fallback."""
 
-import pytest
-from pytest_mock import MockerFixture
+from __future__ import annotations
 
-from superrobot.dr.cli_wrapper import DrCommandResult
-from superrobot.models.analysis_result import AnalysisResult
-from superrobot.pipeline.evaluator import _evaluate_output, _generate_inputs, run_eval
+import asyncio
+from pathlib import Path
+
+from superrobot.models.analysis_result import AnalysisResult, DrFramework
+from superrobot.pipeline.evaluator import _crash_reason, run_eval
 
 
-@pytest.fixture
-def analysis() -> AnalysisResult:
+class _NoDrCli:
+    """Simulates a machine where dr run dev always fails."""
+
+    async def run_dev(self, input_json: str, cwd: str | None = None, timeout: float = 30.0):
+        from superrobot.dr.cli_wrapper import DrCommandResult
+
+        return DrCommandResult(returncode=1, stdout="", stderr="unknown command")
+
+
+def _analysis() -> AnalysisResult:
     return AnalysisResult(
-        agent_purpose="Test agent",
+        agent_purpose="echo",
+        dr_framework=DrFramework.LANGGRAPH,
         input_schema={"query": "str"},
         output_schema={"response": "str"},
-        confidence=0.9,
+        suggested_ui_components=[],
+        confidence=1.0,
     )
 
 
-def test_generate_inputs_count(analysis: AnalysisResult) -> None:
-    inputs = _generate_inputs(analysis)
-    assert len(inputs) == 5
-    assert all("query" in inp for inp in inputs)
-
-
-def test_evaluate_output_pass(analysis: AnalysisResult) -> None:
-    status, reason = _evaluate_output('{"response": "ok"}', analysis, 100.0)
-    assert status == "pass"
-    assert reason is None
-
-
-def test_evaluate_output_schema_violation(analysis: AnalysisResult) -> None:
-    status, reason = _evaluate_output('{"wrong": "field"}', analysis, 100.0)
-    assert status == "fail"
-    assert reason == "schema_violation"
-
-
-def test_evaluate_output_timeout(analysis: AnalysisResult) -> None:
-    status, reason = _evaluate_output('{"response": "ok"}', analysis, 35_000.0)
-    assert status == "fail"
-    assert reason == "timeout"
-
-
-@pytest.mark.asyncio
-async def test_run_eval_with_mock_cli(analysis: AnalysisResult, mocker: MockerFixture) -> None:
-    mock_cli = mocker.Mock()
-    mock_cli.run_dev = mocker.AsyncMock(
-        return_value=DrCommandResult(returncode=0, stdout='{"response": "ok"}', stderr="")
+def test_direct_fallback_runs_migrated_logic(tmp_path: Path) -> None:
+    bundle = tmp_path / "agent" / "agent"
+    bundle.mkdir(parents=True)
+    (bundle / "main.py").write_text(
+        "async def run_agent(query):\n    return {'response': f'ok: {query}'}\n"
     )
-    summary = await run_eval(analysis, cli=mock_cli)
-    assert summary.total == 5
-    assert summary.passed == 5
+    summary = asyncio.run(
+        run_eval(
+            _analysis(),
+            cwd=str(tmp_path),
+            cli=_NoDrCli(),  # type: ignore[arg-type]
+            entry=("main", "run_agent", ["query"]),
+        )
+    )
+    assert summary.passed == summary.total == 5
+    assert summary.results[0].output is not None
+    assert "ok:" in summary.results[0].output
+
+
+def test_direct_fallback_reports_real_failure_reason(tmp_path: Path) -> None:
+    bundle = tmp_path / "agent" / "agent"
+    bundle.mkdir(parents=True)
+    (bundle / "main.py").write_text("import not_a_real_module\n")
+    summary = asyncio.run(
+        run_eval(
+            _analysis(),
+            cwd=str(tmp_path),
+            cli=_NoDrCli(),  # type: ignore[arg-type]
+            entry=("main", "run_agent", ["query"]),
+        )
+    )
+    assert summary.errors == 5
+    reason = summary.results[0].failure_reason or ""
+    assert "ModuleNotFoundError" in reason
+
+
+def test_no_entry_keeps_crash_status() -> None:
+    summary = asyncio.run(
+        run_eval(_analysis(), cwd=".", cli=_NoDrCli(), entry=None)  # type: ignore[arg-type]
+    )
+    assert summary.errors == 5
+
+
+def test_crash_reason_distils_stderr() -> None:
+    assert _crash_reason("Traceback...\nValueError: bad input") == "crash: ValueError: bad input"
+    assert _crash_reason("") == "crash"
