@@ -119,5 +119,117 @@ def status_cmd(
     raise typer.Exit(1)
 
 
+@app.command("scan")
+def scan_cmd(
+    source: Annotated[str, typer.Argument(help="Local path or GitHub URL")],
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Stage 1 — static scan; emit ScanResult."""
+    from superrobot.engine.pipeline import TransformEngine
+
+    engine = TransformEngine()
+    repo = asyncio.run(engine.resolve_source(source))
+    result = engine.run_scan(repo)
+    if json_out:
+        console.print_json(result.model_dump_json())
+    else:
+        console.print(
+            f"[cyan]framework[/]={result.detected_framework} "
+            f"[cyan]confidence[/]={result.confidence:.0%} "
+            f"[cyan]entries[/]={len(result.entry_points)}"
+        )
+    raise typer.Exit(0)
+
+
+@app.command("analyze")
+def analyze_cmd(
+    source: Annotated[str, typer.Argument(help="Local path or GitHub URL")],
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Stages 1–2 — scan + analyze; emit AnalysisResult."""
+    from superrobot.engine.pipeline import TransformEngine
+
+    engine = TransformEngine()
+
+    async def _run() -> None:
+        repo = await engine.resolve_source(source)
+        scan = engine.run_scan(repo)
+        analysis = await engine.run_analyze(scan)
+        if json_out:
+            console.print_json(analysis.model_dump_json())
+        else:
+            console.print(
+                f"[cyan]purpose[/]={analysis.agent_purpose}\n"
+                f"[cyan]framework[/]={analysis.dr_framework.value} "
+                f"[cyan]confidence[/]={analysis.confidence:.0%}"
+            )
+
+    asyncio.run(_run())
+    raise typer.Exit(0)
+
+
+@app.command("generate")
+def generate_cmd(
+    source: Annotated[str, typer.Argument(help="Local path or GitHub URL")],
+    output_dir: Annotated[Path, typer.Option("--output-dir", "-o")],
+    framework: Annotated[str | None, typer.Option("--framework")] = None,
+) -> None:
+    """Stages 1–3 — write Agent App packaging into --output-dir."""
+    from superrobot.engine.pipeline import TransformEngine
+
+    engine = TransformEngine()
+
+    async def _run() -> None:
+        ctx = await engine.transform(
+            source,
+            output_dir=output_dir,
+            skip_eval=True,
+            skip_deploy=True,
+            framework=framework,
+        )
+        console.print(f"[green]wrote[/] {len(ctx.files)} files → {ctx.output_dir}")
+
+    asyncio.run(_run())
+    raise typer.Exit(0)
+
+
+@app.command("transform")
+def transform_cmd(
+    source: Annotated[str, typer.Argument(help="Local path or GitHub URL")],
+    output_dir: Annotated[Path | None, typer.Option("--output-dir", "-o")] = None,
+    skip_eval: Annotated[bool, typer.Option("--skip-eval")] = False,
+    framework: Annotated[str | None, typer.Option("--framework")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Full brownfield transform (Scan → Analyze → Generate → Eval)."""
+    from superrobot.engine.pipeline import TransformEngine
+
+    engine = TransformEngine()
+
+    async def _run() -> None:
+        ctx = await engine.transform(
+            source,
+            output_dir=output_dir,
+            skip_eval=skip_eval,
+            skip_deploy=True,
+            framework=framework,
+        )
+        payload = {
+            "repo_path": ctx.repo_path,
+            "output_dir": str(ctx.output_dir),
+            "scan": ctx.scan.model_dump() if ctx.scan else None,
+            "analysis": ctx.analysis.model_dump() if ctx.analysis else None,
+            "files": sorted(ctx.files.keys()),
+            "eval": ctx.eval_summary.model_dump() if ctx.eval_summary else None,
+        }
+        if json_out:
+            console.print_json(json.dumps(payload, default=str))
+        else:
+            console.print(f"[green]transform complete[/] files={len(ctx.files)} → {ctx.output_dir}")
+
+    asyncio.run(_run())
+    raise typer.Exit(0)
+
+
 if __name__ == "__main__":
     app()

@@ -25,15 +25,14 @@ async def run_doctor(
 
     endpoint_raw = (
         endpoint_override
-        or os.environ.get("DATAROBOT_ENDPOINT")
         or env.get("DATAROBOT_ENDPOINT")
         or (state.endpoint if state else "")
+        or ("" if config_root is not None else os.environ.get("DATAROBOT_ENDPOINT", ""))
     )
     token = (
         token_override
-        or os.environ.get("DATAROBOT_API_TOKEN")
         or env.get("DATAROBOT_API_TOKEN")
-        or ""
+        or ("" if config_root is not None else os.environ.get("DATAROBOT_API_TOKEN", ""))
     )
 
     try:

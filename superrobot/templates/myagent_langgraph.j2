@@ -1,0 +1,39 @@
+"""{{ agent_purpose }} — LangGraph agent for DataRobot."""
+
+import os
+from typing import Any
+
+import datarobot as dr
+from datarobot_genai import LangGraphAgent  # verify against recipe-datarobot-agent-templates
+
+{% if migrated %}import inspect
+
+from {{ entry_module }} import {{ entry_function }}  # migrated source (flat DRUM import)
+
+{% endif %}
+
+class MyAgent(LangGraphAgent):
+    """Generated LangGraph agent."""
+
+    def __init__(self, runtime_params: dict[str, str] | None = None) -> None:
+        super().__init__()
+        self._runtime_params = runtime_params or {}
+
+    @property
+    def system_prompt(self) -> str:
+        template = dr.genai.PromptTemplate.get(os.environ["PROMPT_TEMPLATE_ID"])
+        return template.get_latest_version().to_fstring()
+
+    async def process(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Process input by delegating to the migrated agent logic."""
+{% if migrated %}        kwargs = {k: v for k, v in payload.items() if k in {{ entry_params }}}
+        result = {{ entry_function }}(**kwargs) if kwargs else {{ entry_function }}(payload)
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, dict):
+            return result
+        return {"response": str(result)}
+{% else %}        # TODO: migrate logic from {{ entry_file }}::{{ entry_function }}
+        result = await self.run_graph(payload)
+        return {"response": str(result)}
+{% endif %}

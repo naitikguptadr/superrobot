@@ -28,6 +28,15 @@ cd shell && npm install && npm run build && npm start
 
 ## Specs
 
+1. [Setup and Gateway](docs/specs/01-setup-and-gateway.md)
+2. [Premium Shell](docs/specs/02-premium-shell.md)
+3. [Transform Engine](docs/specs/03-transform-engine.md) ← current
+
+```bash
+uv run superrobot scan tests/fixtures/langchain_agent --json
+uv run superrobot transform tests/fixtures/langchain_agent --json --skip-eval -o /tmp/sr-out
+```
+
 1. [Setup + Gateway](docs/specs/01-setup-and-gateway.md)
 2. [Premium shell](docs/specs/02-premium-shell.md)
 
