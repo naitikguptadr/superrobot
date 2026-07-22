@@ -1,10 +1,10 @@
 # Handoff — SuperRobot Pi Hybrid Rebuild
 
 **Date:** 2026-07-22
-**Status:** Specs 01–08 complete and committed. Shell rewired against Pi's real
-extension/theme API. Verification matrix + golden-path demo written. Only the
-cutover PR (archive tag + push + PR against `feat/brownfield-pipeline-and-tui`,
-no merge) remains.
+**Status:** Everything in the plan is done. Specs 01–08 complete and committed.
+Shell rewired against Pi's real extension/theme API. Verification matrix +
+golden-path demo written. Cutover PR opened:
+**https://github.com/naitikguptadr/superrobot/pull/1** (not merged — human call).
 
 ---
 
@@ -133,11 +133,20 @@ None — working tree matches HEAD after every commit in this pass.
 
 ## Remaining plan order
 
+Nothing — every item is done.
+
 1–5. ~~Specs 05–08 + shell deepening~~ done
 6. ~~Verification matrix + demo~~ done
-7. **Cutover PR** — tag `archive/pre-pi-rebuild` on `feat/brownfield-pipeline-and-tui`,
-   push `rebuild/pi-datarobot`, open a PR proposing the full-tree replace. **Do not
-   merge it or change the default branch** — that's a human call, reviewed via the PR.
+7. ~~Cutover PR~~ done: **https://github.com/naitikguptadr/superrobot/pull/1**
+   — `archive/pre-pi-rebuild` tag pushed (points at old tree's tip `6800fd1`),
+   `rebuild/pi-datarobot` pushed. GitHub refused a direct PR between
+   `rebuild/pi-datarobot` and `feat/brownfield-pipeline-and-tui` ("no history in
+   common" — expected for a true orphan branch), so the PR head is
+   `cutover/pi-datarobot-into-main`: `rebuild/pi-datarobot` plus one merge commit
+   made with git's whole-tree `ours` strategy against `feat/brownfield-pipeline-and-tui`
+   purely to satisfy GitHub's PR requirement — `git diff rebuild/pi-datarobot
+   cutover/pi-datarobot-into-main` is empty, content is unchanged. **Not merged** —
+   left for human review, as agreed.
 
 ---
 
@@ -156,19 +165,15 @@ None — working tree matches HEAD after every commit in this pass.
 ## Suggested first message for next agent
 
 ```text
-Continue the SuperRobot Pi hybrid rebuild in /Users/naitikgupta/Projects/superrobot
-on branch rebuild/pi-datarobot. Read HANDOFF.md (no external plan file exists on this
-machine — HANDOFF.md + docs/specs/*.md + docs/verification-matrix.md are the source
-of truth).
+The SuperRobot Pi hybrid rebuild plan is fully done as of 2026-07-22 — Specs 01-08,
+shell rewired against Pi's real API, docs/demo.md + scripts/demo.sh verified working,
+and the cutover PR is open: https://github.com/naitikguptadr/superrobot/pull/1
+(not merged — that's a human call). Read HANDOFF.md before assuming there's more
+rebuild work queued up; there isn't, unless the user has since merged the PR and
+wants follow-on work, or wants the Swarm integration (nothing to port — it does not
+exist in this codebase; get a real API contract before writing a client).
 
-Specs 01–08 are done, shell is rewired against Pi's real API, docs/demo.md +
-scripts/demo.sh are verified working. The only remaining item is the cutover PR
-(archive tag + push + PR against feat/brownfield-pipeline-and-tui, no merge) — check
-whether it's already been opened (`gh pr list`) before redoing it.
-
-If asked to build the Swarm integration: there is nothing to port or extend — it does
-not exist in this codebase. Get a real API contract before writing a client.
-
-Do not touch the Textual TUI. Do not rewrite the engine in TypeScript.
-Spec-by-spec commits only.
+If continuing post-merge cleanup or new feature work: do not touch the Textual TUI
+(archived at tag archive/pre-pi-rebuild), do not rewrite the engine in TypeScript,
+spec-by-spec commits only.
 ```
