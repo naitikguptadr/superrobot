@@ -18,6 +18,7 @@ from superrobot.setup.runner import run_setup
 
 if TYPE_CHECKING:
     from superrobot.models.gap_result import GapReport
+    from superrobot.models.receipt import Receipt
     from superrobot.setup.models import SetupState
 
 console = Console()
@@ -307,7 +308,11 @@ def deploy_cmd(
 
     if target == "agent-app":
         raise typer.Exit(
-            asyncio.run(_deploy_agent_app(path, has_ui=has_ui, waive=waive, json_out=json_out))
+            asyncio.run(
+                _deploy_agent_app(
+                    path, has_ui=has_ui, waive=waive, config_dir=config_dir, json_out=json_out
+                )
+            )
         )
     raise typer.Exit(
         asyncio.run(
@@ -323,8 +328,87 @@ def deploy_cmd(
     )
 
 
-def _gap_gate(path: Path, *, waive: bool, json_out: bool, target: str) -> bool:
-    """Run Gap Analysis; print findings; return True iff deploy should proceed."""
+def _resolve_credentials(config_dir: Path | None) -> tuple[str, str, SetupState | None]:
+    """Endpoint, token, and persisted SetupState — same resolution order as doctor."""
+    from superrobot.setup.config import load_env_file, load_state
+
+    env = load_env_file(config_dir)
+    state = load_state(config_dir)
+    endpoint = (
+        env.get("DATAROBOT_ENDPOINT")
+        or (state.endpoint if state else "")
+        or os.environ.get("DATAROBOT_ENDPOINT", "")
+    )
+    token = env.get("DATAROBOT_API_TOKEN") or os.environ.get("DATAROBOT_API_TOKEN", "")
+    return endpoint, token, state
+
+
+def _resolve_model(config_dir: Path | None) -> str:
+    from superrobot.dr.llm_gateway import DEFAULT_MODEL
+
+    _, _, state = _resolve_credentials(config_dir)
+    return (state.model if state else "") or os.environ.get("SUPERROBOT_MODEL", DEFAULT_MODEL)
+
+
+def _record_receipt(
+    *,
+    target: str,
+    action: str,
+    success: bool,
+    config_dir: Path | None,
+    manifest_dir: Path,
+    gap_report: GapReport | None = None,
+    waived: bool = False,
+    error_message: str | None = None,
+    image_uri: str | None = None,
+    has_ui: bool = False,
+    replaces: str | None = None,
+) -> None:
+    import uuid
+    from datetime import UTC, datetime
+
+    from superrobot.models.receipt import Receipt
+    from superrobot.pipeline.receipts import save_receipt
+
+    gap_summary = {
+        "blocking": len(gap_report.blocking) if gap_report else 0,
+        "warnings": len(gap_report.warnings) if gap_report else 0,
+    }
+    waived_findings = (
+        [f.message for f in gap_report.blocking]
+        if gap_report and waived and gap_report.blocking
+        else []
+    )
+    receipt = Receipt(
+        id=uuid.uuid4().hex[:12],
+        created_at=datetime.now(UTC).isoformat(),
+        target=target,  # type: ignore[arg-type]
+        action=action,  # type: ignore[arg-type]
+        success=success,
+        model=_resolve_model(config_dir),
+        gap_summary=gap_summary,
+        waived_findings=waived_findings,
+        error_message=error_message,
+        replaces=replaces,
+        manifest_dir=str(manifest_dir),
+        image_uri=image_uri,
+        has_ui=has_ui,
+    )
+    save_receipt(receipt, config_dir)
+
+
+def _gap_gate(
+    path: Path,
+    *,
+    waive: bool,
+    json_out: bool,
+    target: str,
+    config_dir: Path | None,
+    image_uri: str | None = None,
+    has_ui: bool = False,
+    replaces: str | None = None,
+) -> GapReport | None:
+    """Run Gap Analysis; print findings; record+return None if deploy is blocked."""
     from superrobot.pipeline.gap_analysis import run_gap_analysis
 
     report = run_gap_analysis(path)
@@ -343,16 +427,45 @@ def _gap_gate(path: Path, *, waive: bool, json_out: bool, target: str) -> bool:
         else:
             _print_gap_findings(report)
             console.print("[red]Deploy refused[/] — fix blocking findings or pass --waive")
-        return False
+        _record_receipt(
+            target=target,
+            action="blocked",
+            success=False,
+            config_dir=config_dir,
+            manifest_dir=path,
+            gap_report=report,
+            error_message="; ".join(f.message for f in report.blocking),
+            image_uri=image_uri,
+            has_ui=has_ui,
+            replaces=replaces,
+        )
+        return None
     if report.findings and not json_out:
         _print_gap_findings(report)
-    return True
+    return report
 
 
-async def _deploy_agent_app(path: Path, *, has_ui: bool, waive: bool, json_out: bool) -> int:
+async def _deploy_agent_app(
+    path: Path,
+    *,
+    has_ui: bool,
+    waive: bool,
+    config_dir: Path | None,
+    json_out: bool,
+    replaces: str | None = None,
+) -> int:
     from superrobot.pipeline.deployer import DEPLOY_WARNINGS, deploy
 
-    if not _gap_gate(path, waive=waive, json_out=json_out, target="agent-app"):
+    gap_report = _gap_gate(
+        path,
+        waive=waive,
+        json_out=json_out,
+        target="agent-app",
+        config_dir=config_dir,
+        has_ui=has_ui,
+        replaces=replaces,
+    )
+    if gap_report is None:
         return 1
 
     for warning in DEPLOY_WARNINGS:
@@ -373,22 +486,19 @@ async def _deploy_agent_app(path: Path, *, has_ui: bool, waive: bool, json_out: 
         console.print("[green]deploy succeeded[/]")
     else:
         console.print(f"[red]deploy failed[/] {result.error_message or ''}")
-    return 0 if result.success else 1
-
-
-def _resolve_credentials(config_dir: Path | None) -> tuple[str, str, SetupState | None]:
-    """Endpoint, token, and persisted SetupState — same resolution order as doctor."""
-    from superrobot.setup.config import load_env_file, load_state
-
-    env = load_env_file(config_dir)
-    state = load_state(config_dir)
-    endpoint = (
-        env.get("DATAROBOT_ENDPOINT")
-        or (state.endpoint if state else "")
-        or os.environ.get("DATAROBOT_ENDPOINT", "")
+    _record_receipt(
+        target="agent-app",
+        action="deployed" if result.success else "failed",
+        success=result.success,
+        config_dir=config_dir,
+        manifest_dir=path,
+        gap_report=gap_report,
+        waived=bool(gap_report.blocking),
+        error_message=result.error_message,
+        has_ui=has_ui,
+        replaces=replaces,
     )
-    token = env.get("DATAROBOT_API_TOKEN") or os.environ.get("DATAROBOT_API_TOKEN", "")
-    return endpoint, token, state
+    return 0 if result.success else 1
 
 
 async def _deploy_workload(
@@ -399,6 +509,7 @@ async def _deploy_workload(
     waive: bool,
     config_dir: Path | None,
     json_out: bool,
+    replaces: str | None = None,
 ) -> int:
     from superrobot.pipeline.workload_deployer import deploy_workload
 
@@ -425,7 +536,16 @@ async def _deploy_workload(
         )
         return 1
 
-    if not _gap_gate(path, waive=waive, json_out=json_out, target="workload"):
+    gap_report = _gap_gate(
+        path,
+        waive=waive,
+        json_out=json_out,
+        target="workload",
+        config_dir=config_dir,
+        image_uri=image_uri,
+        replaces=replaces,
+    )
+    if gap_report is None:
         return 1
 
     result = await deploy_workload(
@@ -448,6 +568,18 @@ async def _deploy_workload(
         console.print(f"[green]workload {result.action}[/] id={result.workload_id}")
     else:
         console.print(f"[red]workload deploy failed[/] {result.error_message or ''}")
+    _record_receipt(
+        target="workload",
+        action=result.action or "failed",
+        success=result.success,
+        config_dir=config_dir,
+        manifest_dir=path,
+        gap_report=gap_report,
+        waived=bool(gap_report.blocking),
+        error_message=result.error_message,
+        image_uri=image_uri,
+        replaces=replaces,
+    )
     return 0 if result.success else 1
 
 
@@ -489,6 +621,151 @@ def memory_ensure_cmd(
     else:
         console.print(f"[red]memory ensure failed[/] {result.error_message or ''}")
     raise typer.Exit(0 if result.success else 1)
+
+
+receipt_app = typer.Typer(help="Deploy receipts — attribution, history, diagnostics.")
+app.add_typer(receipt_app, name="receipt")
+
+
+def _print_receipt(receipt: Receipt) -> None:
+    status = "[green]success[/]" if receipt.success else "[red]failed[/]"
+    console.print(
+        f"[cyan]{receipt.id}[/] {receipt.target}/{receipt.action} {status} "
+        f"model={receipt.model} at={receipt.created_at}"
+    )
+    if receipt.replaces:
+        console.print(f"  replaces: {receipt.replaces}")
+    if receipt.waived_findings:
+        console.print(f"  waived: {len(receipt.waived_findings)} blocking finding(s)")
+    if receipt.error_message:
+        console.print(f"  error: {receipt.error_message}")
+
+
+@receipt_app.command("show")
+def receipt_show_cmd(
+    receipt_id: Annotated[str | None, typer.Argument(help="Receipt id (default: latest)")] = None,
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show one receipt — defaults to the most recent."""
+    from superrobot.pipeline.receipts import latest_receipt, load_receipt
+
+    receipt = load_receipt(receipt_id, config_dir) if receipt_id else latest_receipt(config_dir)
+    if receipt is None:
+        console.print("[yellow]No receipts found[/]")
+        raise typer.Exit(1)
+    if json_out:
+        console.print_json(receipt.model_dump_json())
+    else:
+        _print_receipt(receipt)
+    raise typer.Exit(0)
+
+
+@receipt_app.command("operations")
+def receipt_operations_cmd(
+    target: Annotated[str | None, typer.Option("--target")] = None,
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """List receipts, newest first."""
+    from superrobot.pipeline.receipts import list_receipts
+
+    receipts = list_receipts(config_dir, target=target)
+    if json_out:
+        console.print_json(json.dumps([r.model_dump() for r in receipts]))
+        raise typer.Exit(0)
+    if not receipts:
+        console.print("[yellow]No receipts found[/]")
+        raise typer.Exit(0)
+    table = Table(title="SuperRobot receipts")
+    table.add_column("id")
+    table.add_column("target")
+    table.add_column("action")
+    table.add_column("status")
+    table.add_column("created_at")
+    for r in receipts:
+        table.add_row(
+            r.id, r.target, r.action, "[green]ok[/]" if r.success else "[red]fail[/]", r.created_at
+        )
+    console.print(table)
+    raise typer.Exit(0)
+
+
+@receipt_app.command("diagnose")
+def receipt_diagnose_cmd(
+    receipt_id: Annotated[str, typer.Argument()],
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Pattern-matched fix suggestion for a failed receipt."""
+    from superrobot.pipeline.receipts import diagnose, load_receipt
+
+    receipt = load_receipt(receipt_id, config_dir)
+    if receipt is None:
+        console.print(f"[red]No such receipt[/] {receipt_id!r}")
+        raise typer.Exit(1)
+    fix = diagnose(receipt)
+    if json_out:
+        console.print_json(json.dumps({"receipt_id": receipt.id, "diagnosis": fix}))
+    else:
+        console.print(fix)
+    raise typer.Exit(0)
+
+
+@receipt_app.command("replace")
+def receipt_replace_cmd(
+    receipt_id: Annotated[str, typer.Argument()],
+    secret: Annotated[
+        list[str] | None,
+        typer.Option("--secret", help="KEY=credential:<id> (workload target, repeatable)"),
+    ] = None,
+    waive: Annotated[
+        bool, typer.Option("--waive", help="Proceed despite blocking Gap Analysis findings")
+    ] = False,
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Re-run the deploy captured by a receipt; the new receipt references it."""
+    from superrobot.pipeline.receipts import load_receipt
+
+    receipt = load_receipt(receipt_id, config_dir)
+    if receipt is None:
+        console.print(f"[red]No such receipt[/] {receipt_id!r}")
+        raise typer.Exit(1)
+    if not receipt.manifest_dir:
+        console.print("[red]Receipt has no manifest_dir recorded — cannot replay[/]")
+        raise typer.Exit(1)
+    path = Path(receipt.manifest_dir)
+
+    if receipt.target == "agent-app":
+        code = asyncio.run(
+            _deploy_agent_app(
+                path,
+                has_ui=receipt.has_ui,
+                waive=waive,
+                config_dir=config_dir,
+                json_out=json_out,
+                replaces=receipt.id,
+            )
+        )
+    else:
+        if not receipt.image_uri:
+            console.print(
+                "[red]Receipt has no image_uri recorded — cannot replay workload deploy[/]"
+            )
+            raise typer.Exit(1)
+        code = asyncio.run(
+            _deploy_workload(
+                path,
+                image_uri=receipt.image_uri,
+                secrets=secret,
+                waive=waive,
+                config_dir=config_dir,
+                json_out=json_out,
+                replaces=receipt.id,
+            )
+        )
+    raise typer.Exit(code)
 
 
 if __name__ == "__main__":
