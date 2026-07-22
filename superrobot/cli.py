@@ -231,5 +231,48 @@ def transform_cmd(
     raise typer.Exit(0)
 
 
+@app.command("deploy")
+def deploy_cmd(
+    path: Annotated[Path, typer.Argument(help="Generated package directory")],
+    target: Annotated[
+        str,
+        typer.Option("--target", help="Deploy target (agent-app only in Spec 04)"),
+    ] = "agent-app",
+    has_ui: Annotated[bool, typer.Option("--has-ui")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Deploy generated packaging to DataRobot Agent App via `dr`."""
+    from superrobot.pipeline.deployer import DEPLOY_WARNINGS, deploy
+
+    if target != "agent-app":
+        console.print(
+            f"[red]Unsupported target[/] {target!r} — Spec 04 supports [cyan]agent-app[/] only"
+        )
+        raise typer.Exit(2)
+    if not path.is_dir():
+        console.print(f"[red]Not a directory[/] {path}")
+        raise typer.Exit(2)
+
+    for warning in DEPLOY_WARNINGS:
+        if not has_ui and "Frontend" in warning:
+            continue
+        console.print(f"[yellow]![/] {warning}")
+
+    result = asyncio.run(deploy(cwd=str(path), has_ui=has_ui))
+    payload = {
+        "success": result.success,
+        "target": target,
+        "warnings": result.warnings,
+        "error_message": result.error_message,
+    }
+    if json_out:
+        console.print_json(json.dumps(payload))
+    elif result.success:
+        console.print("[green]deploy succeeded[/]")
+    else:
+        console.print(f"[red]deploy failed[/] {result.error_message or ''}")
+    raise typer.Exit(0 if result.success else 1)
+
+
 if __name__ == "__main__":
     app()

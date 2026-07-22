@@ -30,11 +30,13 @@ cd shell && npm install && npm run build && npm start
 
 1. [Setup and Gateway](docs/specs/01-setup-and-gateway.md)
 2. [Premium Shell](docs/specs/02-premium-shell.md)
-3. [Transform Engine](docs/specs/03-transform-engine.md) ← current
+3. [Transform Engine](docs/specs/03-transform-engine.md)
+4. [Agent App Deploy](docs/specs/04-agent-app-deploy.md) ← current
 
 ```bash
 uv run superrobot scan tests/fixtures/langchain_agent --json
 uv run superrobot transform tests/fixtures/langchain_agent --json --skip-eval -o /tmp/sr-out
+uv run superrobot deploy /tmp/sr-out --target agent-app --json
 ```
 
 1. [Setup + Gateway](docs/specs/01-setup-and-gateway.md)
