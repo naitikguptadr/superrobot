@@ -17,6 +17,7 @@ from superrobot.setup.doctor import run_doctor
 from superrobot.setup.runner import run_setup
 
 if TYPE_CHECKING:
+    from superrobot.models.gap_result import GapReport
     from superrobot.setup.models import SetupState
 
 console = Console()
@@ -235,6 +236,44 @@ def transform_cmd(
     raise typer.Exit(0)
 
 
+@app.command("validate")
+def validate_cmd(
+    path: Annotated[Path, typer.Argument(help="Generated package directory")],
+    source: Annotated[
+        Path | None,
+        typer.Option("--source", help="Original repo — enables the pyproject-removal check"),
+    ] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Gap Analysis — platform-rule findings, blocking vs. warning."""
+    from superrobot.pipeline.gap_analysis import run_gap_analysis
+
+    if not path.is_dir():
+        console.print(f"[red]Not a directory[/] {path}")
+        raise typer.Exit(2)
+
+    report = run_gap_analysis(path, source_repo=source)
+    if json_out:
+        console.print_json(report.model_dump_json())
+    else:
+        _print_gap_findings(report)
+    raise typer.Exit(1 if report.blocking else 0)
+
+
+def _print_gap_findings(report: GapReport) -> None:
+    if not report.findings:
+        console.print("[green]no gaps found[/]")
+        return
+    for finding in report.findings:
+        color = "red" if finding.severity == "blocking" else "yellow"
+        location = f" ({finding.file})" if finding.file else ""
+        console.print(f"[{color}]{finding.severity}[/] {finding.rule}: {finding.message}{location}")
+    if report.blocking:
+        console.print(
+            f"[red]{len(report.blocking)} blocking finding(s)[/] — deploy refuses without --waive"
+        )
+
+
 @app.command("deploy")
 def deploy_cmd(
     path: Annotated[Path, typer.Argument(help="Generated package directory")],
@@ -250,6 +289,9 @@ def deploy_cmd(
         list[str] | None,
         typer.Option("--secret", help="KEY=credential:<id> (workload target, repeatable)"),
     ] = None,
+    waive: Annotated[
+        bool, typer.Option("--waive", help="Proceed despite blocking Gap Analysis findings")
+    ] = False,
     config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
     json_out: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
@@ -264,18 +306,54 @@ def deploy_cmd(
         raise typer.Exit(2)
 
     if target == "agent-app":
-        raise typer.Exit(asyncio.run(_deploy_agent_app(path, has_ui=has_ui, json_out=json_out)))
+        raise typer.Exit(
+            asyncio.run(_deploy_agent_app(path, has_ui=has_ui, waive=waive, json_out=json_out))
+        )
     raise typer.Exit(
         asyncio.run(
             _deploy_workload(
-                path, image_uri=image_uri, secrets=secret, config_dir=config_dir, json_out=json_out
+                path,
+                image_uri=image_uri,
+                secrets=secret,
+                waive=waive,
+                config_dir=config_dir,
+                json_out=json_out,
             )
         )
     )
 
 
-async def _deploy_agent_app(path: Path, *, has_ui: bool, json_out: bool) -> int:
+def _gap_gate(path: Path, *, waive: bool, json_out: bool, target: str) -> bool:
+    """Run Gap Analysis; print findings; return True iff deploy should proceed."""
+    from superrobot.pipeline.gap_analysis import run_gap_analysis
+
+    report = run_gap_analysis(path)
+    if report.blocking and not waive:
+        if json_out:
+            console.print_json(
+                json.dumps(
+                    {
+                        "success": False,
+                        "target": target,
+                        "blocked_by_gap_analysis": True,
+                        "findings": [f.model_dump() for f in report.blocking],
+                    }
+                )
+            )
+        else:
+            _print_gap_findings(report)
+            console.print("[red]Deploy refused[/] — fix blocking findings or pass --waive")
+        return False
+    if report.findings and not json_out:
+        _print_gap_findings(report)
+    return True
+
+
+async def _deploy_agent_app(path: Path, *, has_ui: bool, waive: bool, json_out: bool) -> int:
     from superrobot.pipeline.deployer import DEPLOY_WARNINGS, deploy
+
+    if not _gap_gate(path, waive=waive, json_out=json_out, target="agent-app"):
+        return 1
 
     for warning in DEPLOY_WARNINGS:
         if not has_ui and "Frontend" in warning:
@@ -318,6 +396,7 @@ async def _deploy_workload(
     *,
     image_uri: str | None,
     secrets: list[str] | None,
+    waive: bool,
     config_dir: Path | None,
     json_out: bool,
 ) -> int:
@@ -344,6 +423,9 @@ async def _deploy_workload(
             "[red]Workload API not entitled on this account[/] — "
             "run [cyan]superrobot doctor[/] to re-probe capabilities"
         )
+        return 1
+
+    if not _gap_gate(path, waive=waive, json_out=json_out, target="workload"):
         return 1
 
     result = await deploy_workload(
