@@ -2,7 +2,7 @@
 
 DataRobot-native brownfield control plane. Migrate any existing Python agent to DataRobot, validate with Gap Analysis, deploy to Agent App or Workload API, and operate with receipts — all through the LLM Gateway.
 
-This tree is the **from-scratch rebuild** on `rebuild/pi-datarobot` (orphan worktree). The previous Textual-era codebase remains on the archive branch/tag `archive/pre-pi-rebuild`.
+This tree is the **from-scratch rebuild** on `rebuild/pi-datarobot` (orphan branch, no shared history with `main`). The previous Textual-era codebase lives on `feat/brownfield-pipeline-and-tui`, tagged `archive/pre-pi-rebuild` as of the cutover PR.
 
 ## Architecture
 
@@ -31,16 +31,23 @@ cd shell && npm install && npm run build && npm start
 1. [Setup and Gateway](docs/specs/01-setup-and-gateway.md)
 2. [Premium Shell](docs/specs/02-premium-shell.md)
 3. [Transform Engine](docs/specs/03-transform-engine.md)
-4. [Agent App Deploy](docs/specs/04-agent-app-deploy.md) ← current
+4. [Agent App Deploy](docs/specs/04-agent-app-deploy.md)
+5. [Workload API Deploy](docs/specs/05-workload-deploy.md)
+6. [Memory API](docs/specs/06-memory-api.md)
+7. [Gap Analysis](docs/specs/07-gap-analysis.md)
+8. [Receipts](docs/specs/08-receipts.md)
+
+See [docs/verification-matrix.md](docs/verification-matrix.md) for how each spec's
+acceptance criteria maps to actual tests, and [docs/demo.md](docs/demo.md) /
+`./scripts/demo.sh` for a runnable golden-path walkthrough.
 
 ```bash
 uv run superrobot scan tests/fixtures/langchain_agent --json
 uv run superrobot transform tests/fixtures/langchain_agent --json --skip-eval -o /tmp/sr-out
+uv run superrobot validate /tmp/sr-out --json
 uv run superrobot deploy /tmp/sr-out --target agent-app --json
+uv run superrobot receipt operations --json
 ```
-
-1. [Setup + Gateway](docs/specs/01-setup-and-gateway.md)
-2. [Premium shell](docs/specs/02-premium-shell.md)
 
 ## Design rules
 

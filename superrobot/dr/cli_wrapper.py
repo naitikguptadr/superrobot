@@ -26,13 +26,18 @@ class DrCliWrapper:
         self._dr = dr_binary
 
     async def _run(self, *args: str, cwd: str | None = None) -> DrCommandResult:
-        proc = await asyncio.create_subprocess_exec(
-            self._dr,
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._dr,
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+            )
+        except FileNotFoundError:
+            return DrCommandResult(
+                returncode=127, stdout="", stderr=f"{self._dr}: command not found — is dr on PATH?"
+            )
         stdout_b, stderr_b = await proc.communicate()
         return DrCommandResult(
             returncode=proc.returncode or 0,
@@ -70,6 +75,11 @@ class DrCliWrapper:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
             )
+        except FileNotFoundError:
+            return DrCommandResult(
+                returncode=127, stdout="", stderr=f"{self._dr}: command not found — is dr on PATH?"
+            )
+        try:
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             return DrCommandResult(
                 returncode=proc.returncode or 0,
