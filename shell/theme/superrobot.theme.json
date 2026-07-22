@@ -1,0 +1,27 @@
+{
+  "name": "superrobot",
+  "displayName": "SuperRobot",
+  "description": "DataRobot-native brownfield control plane theme",
+  "colors": {
+    "bg": "#0B1220",
+    "fg": "#E8EEF7",
+    "accent": "#3DDBD9",
+    "accentMuted": "#1F6F78",
+    "warn": "#F5A524",
+    "error": "#FF5C5C",
+    "success": "#3DDB88",
+    "border": "#1C2A3F",
+    "panel": "#111A2B",
+    "dim": "#7F8DA3"
+  },
+  "typography": {
+    "ui": "IBM Plex Sans",
+    "mono": "IBM Plex Mono",
+    "display": "Söhne Breit"
+  },
+  "motion": {
+    "splashMs": 900,
+    "stagePulseMs": 140,
+    "deployIgniteMs": 220
+  }
+}
