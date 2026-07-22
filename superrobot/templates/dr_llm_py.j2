@@ -93,3 +93,115 @@ def dr_async_openai(*args: Any, **kwargs: Any) -> Any:
         kwargs.pop("base_url", None)
         kwargs.update(cfg)
     return AsyncOpenAI(*args, **kwargs)
+
+
+def _strip_provider_keys(kwargs: dict[str, Any], *keys: str) -> None:
+    for key in keys:
+        kwargs.pop(key, None)
+
+
+def _apply_gateway(kwargs: dict[str, Any]) -> dict[str, str]:
+    cfg = _gateway_config()
+    if cfg:
+        _strip_provider_keys(
+            kwargs,
+            "api_key",
+            "base_url",
+            "openai_api_key",
+            "openai_api_base",
+            "anthropic_api_key",
+            "google_api_key",
+        )
+        model = kwargs.pop("model", None) or kwargs.pop("model_name", None)
+        if model:
+            kwargs["model"] = _gateway_model(model)
+        kwargs.update(cfg)
+    return cfg
+
+
+def dr_chat_anthropic(*args: Any, **kwargs: Any) -> Any:
+    from langchain_anthropic import ChatAnthropic
+
+    _apply_gateway(kwargs)
+    return ChatAnthropic(*args, **kwargs)
+
+
+def dr_anthropic(*args: Any, **kwargs: Any) -> Any:
+    from anthropic import Anthropic
+
+    cfg = _gateway_config()
+    if cfg:
+        _strip_provider_keys(kwargs, "api_key", "anthropic_api_key", "base_url")
+        kwargs.update(cfg)
+    return Anthropic(*args, **kwargs)
+
+
+def dr_async_anthropic(*args: Any, **kwargs: Any) -> Any:
+    from anthropic import AsyncAnthropic
+
+    cfg = _gateway_config()
+    if cfg:
+        _strip_provider_keys(kwargs, "api_key", "anthropic_api_key", "base_url")
+        kwargs.update(cfg)
+    return AsyncAnthropic(*args, **kwargs)
+
+
+def dr_chat_google(*args: Any, **kwargs: Any) -> Any:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    _apply_gateway(kwargs)
+    return ChatGoogleGenerativeAI(*args, **kwargs)
+
+
+def dr_chat_vertex(*args: Any, **kwargs: Any) -> Any:
+    from langchain_google_vertexai import ChatVertexAI
+
+    _apply_gateway(kwargs)
+    return ChatVertexAI(*args, **kwargs)
+
+
+def dr_chat_bedrock(*args: Any, **kwargs: Any) -> Any:
+    from langchain_aws import ChatBedrock
+
+    _apply_gateway(kwargs)
+    return ChatBedrock(*args, **kwargs)
+
+
+def dr_chat_groq(*args: Any, **kwargs: Any) -> Any:
+    from langchain_groq import ChatGroq
+
+    _apply_gateway(kwargs)
+    return ChatGroq(*args, **kwargs)
+
+
+def dr_chat_ollama(*args: Any, **kwargs: Any) -> Any:
+    from langchain_ollama import ChatOllama
+
+    _apply_gateway(kwargs)
+    return ChatOllama(*args, **kwargs)
+
+
+def dr_chat_mistral(*args: Any, **kwargs: Any) -> Any:
+    from langchain_mistralai import ChatMistralAI
+
+    _apply_gateway(kwargs)
+    return ChatMistralAI(*args, **kwargs)
+
+
+def dr_chat_cohere(*args: Any, **kwargs: Any) -> Any:
+    from langchain_cohere import ChatCohere
+
+    _apply_gateway(kwargs)
+    return ChatCohere(*args, **kwargs)
+
+
+def dr_litellm_completion(*args: Any, **kwargs: Any) -> Any:
+    import litellm
+
+    cfg = _gateway_config()
+    if cfg:
+        kwargs.setdefault("api_base", cfg["base_url"])
+        kwargs.setdefault("api_key", cfg["api_key"])
+        if "model" in kwargs:
+            kwargs["model"] = _gateway_model(kwargs["model"])
+    return litellm.completion(*args, **kwargs)

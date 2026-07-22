@@ -1,16 +1,16 @@
-"""SuperRobot first-run setup."""
+"""Setup package exports."""
 
-from superrobot.setup.checks import SetupCheckResult, run_all_checks
-from superrobot.setup.runner import SetupRunner, SetupStep
-from superrobot.setup.state import SetupState, is_setup_complete, load_setup_state, save_setup_state
+from superrobot.setup.doctor import run_doctor
+from superrobot.setup.endpoints import api_endpoint, normalize_endpoint
+from superrobot.setup.models import CapabilityMatrix, DoctorResult, SetupState
+from superrobot.setup.runner import run_setup
 
 __all__ = [
-    "SetupCheckResult",
-    "SetupRunner",
+    "CapabilityMatrix",
+    "DoctorResult",
     "SetupState",
-    "SetupStep",
-    "is_setup_complete",
-    "load_setup_state",
-    "run_all_checks",
-    "save_setup_state",
+    "api_endpoint",
+    "normalize_endpoint",
+    "run_doctor",
+    "run_setup",
 ]

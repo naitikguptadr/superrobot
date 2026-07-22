@@ -13,9 +13,11 @@ from superrobot.dr.platform_rules import (
     validate_pyproject,
     validate_runtime_params,
 )
+from superrobot.engine.providers import LLM_CLIENT_SHIMS as _LLM_REWRITES
 from superrobot.models.agent_config import AgentConfig
 from superrobot.models.analysis_result import AnalysisResult, DrFramework
 from superrobot.models.scan_result import ScanResult
+from superrobot.pipeline.ast_migrate import MigrationReport, deep_migrate_source
 
 TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
 
@@ -60,25 +62,26 @@ _EXCLUDED_DIR_PARTS = {".venv", "node_modules", ".superrobot", ".git", "__pycach
 # names the generated bundle already claims
 _RESERVED_MODULES = {"custom", "myagent", "dr_llm"}
 
-# LLM client constructors rewired to the DR LLM Gateway shim (dr_llm.py)
-_LLM_REWRITES = {
-    "ChatOpenAI": "dr_chat_openai",
-    "AzureChatOpenAI": "dr_azure_chat_openai",
-    "AsyncOpenAI": "dr_async_openai",
-    "OpenAI": "dr_openai",
-}
-
 
 def migrate_source_files(repo_path: str | Path) -> dict[str, str]:
-    """Copy the source repo's Python modules into the bundle, DRUM-flattened.
+    """Copy the source repo's Python modules into the bundle, DRUM-flattened."""
+    files, _report = migrate_source_files_with_report(repo_path)
+    return files
+
+
+def migrate_source_files_with_report(
+    repo_path: str | Path,
+) -> tuple[dict[str, str], MigrationReport]:
+    """Like migrate_source_files, but also returns an aggregated MigrationReport.
 
     DRUM merges agent/agent/ into a flat bundle, so tools/search.py becomes
-    search.py and every dotted import of a copied module is rewritten to the
-    flat form. Returns {"agent/agent/<flat>.py": rewritten_source}.
+    search.py. Deep AST pass rewrites imports, strips secret env defaults,
+    and flags A2A gather / hardcoded prompts.
     """
     root = Path(repo_path).resolve()
+    empty_report = MigrationReport()
     if not root.exists():
-        return {}
+        return {}, empty_report
 
     sources: dict[str, Path] = {}  # dotted module path -> file
     for py_file in sorted(root.rglob("*.py")):
@@ -100,12 +103,20 @@ def migrate_source_files(repo_path: str | Path) -> dict[str, str]:
         flat_names[dotted] = flat
 
     migrated: dict[str, str] = {}
+    aggregate = MigrationReport()
     for dotted, py_file in sources.items():
         content = py_file.read_text(encoding="utf-8", errors="replace")
+        content, report = deep_migrate_source(content, flat_names)
+        # regex fallback for relative imports AST may miss after unparse churn
         content = _rewrite_imports(content, flat_names)
         content = _rewrite_llm_calls(content)
+        aggregate.flat_imports += report.flat_imports
+        aggregate.env_rewrites += report.env_rewrites
+        aggregate.gather_warnings += report.gather_warnings
+        aggregate.prompt_extractions += report.prompt_extractions
+        aggregate.notes.extend(report.notes)
         migrated[f"agent/agent/{flat_names[dotted]}.py"] = content
-    return migrated
+    return migrated, aggregate
 
 
 def flat_module_name(repo_path: str | Path, entry_file: str) -> str:
@@ -200,7 +211,7 @@ def render_files(config: AgentConfig) -> dict[str, str]:
         else Path(config.entry_file).stem
     )
 
-    from superrobot.setup.constants import DEFAULT_MODEL
+    from superrobot.dr.llm_gateway import DEFAULT_MODEL
 
     ctx = {
         "config": config,
@@ -255,6 +266,11 @@ def render_files(config: AgentConfig) -> dict[str, str]:
     if migrated:
         # gateway shim so the migrated LLM calls run on DR without provider keys
         files["agent/agent/dr_llm.py"] = jinja.get_template("dr_llm_py.j2").render(**ctx)
+        files["agent/agent/workload_service.py"] = jinja.get_template(
+            "workload_service_py.j2"
+        ).render(**ctx)
+        files["workload/Dockerfile"] = jinja.get_template("workload_Dockerfile.j2").render(**ctx)
+        files["workload/workload.yaml"] = jinja.get_template("workload_yaml.j2").render(**ctx)
     return files
 
 

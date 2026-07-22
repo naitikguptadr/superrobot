@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from superrobot.dr.llm_gateway import LLMGateway, has_llm_credentials
 
 
-def test_has_llm_credentials_false_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_has_llm_credentials_false_when_unset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPERROBOT_CONFIG_DIR", str(tmp_path))
     monkeypatch.delenv("DATAROBOT_API_TOKEN", raising=False)
     monkeypatch.delenv("DATAROBOT_ENDPOINT", raising=False)
     assert has_llm_credentials() is False

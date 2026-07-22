@@ -1,209 +1,101 @@
-"""Setup orchestration — headless and TUI-backed."""
+"""Interactive and non-interactive setup runner."""
 
 from __future__ import annotations
 
-import asyncio
 import os
-import sys
-from dataclasses import dataclass
-from enum import StrEnum
+from pathlib import Path
 
 from rich.console import Console
-from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
-from rich.table import Table
 
-from superrobot.dr.cli_wrapper import DrCliWrapper
-from superrobot.env import load_user_env, write_env_file
-from superrobot.setup.checks import (
-    SetupCheckResult,
-    auth_matches_endpoint,
-    run_all_checks,
-)
-from superrobot.setup.constants import (
-    DEFAULT_MODEL,
-    ENDPOINT_PRESETS,
-    api_endpoint,
-    endpoint_label,
-    normalize_endpoint,
-)
-from superrobot.setup.state import mark_setup_complete
+from superrobot.setup.config import save_state, write_token_env
+from superrobot.setup.doctor import run_doctor
+from superrobot.setup.endpoints import ENDPOINT_PRESETS, api_endpoint, normalize_endpoint
+from superrobot.setup.gateway import verify_gateway
+from superrobot.setup.models import AuthMethod, DoctorResult, SetupState
+from superrobot.setup.probes import check_dr_auth, probe_capabilities
 
 
-class SetupStep(StrEnum):
-    """Setup wizard steps."""
+async def run_setup(
+    *,
+    console: Console | None = None,
+    config_root: str | Path | None = None,
+    endpoint: str | None = None,
+    token: str | None = None,
+    model: str | None = None,
+    skip_gateway: bool = False,
+    non_interactive: bool = False,
+) -> DoctorResult:
+    """Configure endpoint + auth, verify Gateway, persist state."""
+    out = console or Console()
+    selected_endpoint = endpoint or os.environ.get("DATAROBOT_ENDPOINT", "")
+    selected_token = token or os.environ.get("DATAROBOT_API_TOKEN", "")
+    selected_model = model or os.environ.get("SUPERROBOT_MODEL", "azure/gpt-5-5-2026-04-23")
 
-    WELCOME = "welcome"
-    PREREQUISITES = "prerequisites"
-    AUTH = "auth"
-    ENVIRONMENT = "environment"
-    GATEWAY = "gateway"
-    COMPLETE = "complete"
-
-
-@dataclass
-class SetupRunner:
-    """Runs the interactive setup flow."""
-
-    console: Console | None = None
-    cli: DrCliWrapper | None = None
-
-    def __post_init__(self) -> None:
-        self.console = self.console or Console()
-        self.cli = self.cli or DrCliWrapper()
-
-    async def run(self, *, skip_gateway: bool = False) -> SetupCheckResult:
-        """Run full headless setup with Rich prompts."""
-        load_user_env()
-        c = self.console
-        assert c is not None
-
-        c.print(
-            Panel.fit(
-                "[bold cyan]SuperRobot Setup[/]\n"
-                "Bring any Python agent to DataRobot without rebuilding it from scratch.\n"
-                "This wizard configures everything you need in a few steps.",
-                border_style="cyan",
-            )
-        )
-
-        # Step 1: Prerequisites
-        c.print("\n[bold]Step 1/4[/] — Prerequisites")
-        result = await run_all_checks(self.cli)
-        self._print_prerequisites(result)
-
-        if not result.prerequisites_ok:
-            c.print(
-                "\n[yellow]Install missing tools above, then re-run:[/] [bold]superrobot setup[/]"
-            )
-            return result
-
-        # Step 2: Environment (selected first so auth targets the right URL)
-        c.print("\n[bold]Step 2/4[/] — Environment variables")
-        endpoint, token, model = self._prompt_environment()
-        write_env_file(
-            {
-                "DATAROBOT_ENDPOINT": endpoint,
-                "DATAROBOT_API_TOKEN": token,
-                "SUPERROBOT_MODEL": model,
-            }
-        )
-        result.endpoint_set = True
-        result.token_set = True
-        c.print("[green]✓[/] Saved to ~/.config/superrobot/.env")
-
-        # Step 3: Auth against the selected environment
-        c.print(f"\n[bold]Step 3/4[/] — DataRobot authentication ({endpoint_label(endpoint)})")
-        needs_login = not result.auth_ok or not auth_matches_endpoint(endpoint)
-        if needs_login:
-            if result.auth_ok:
-                c.print(
-                    f"[yellow]dr is authenticated against a different environment.[/] "
-                    f"Re-authenticating against [bold]{endpoint}[/]..."
-                )
-            else:
-                c.print(
-                    f"[yellow]Not authenticated.[/] Launching [bold]dr auth login {endpoint}[/]..."
-                )
-            login_ok = await self._run_auth_login(endpoint)
-            if not login_ok:
-                c.print(f"[red]Authentication failed. Run:[/] dr auth login {endpoint}")
-                return result
-            result.auth_ok = True
-        else:
-            c.print(f"[green]✓[/] dr auth check passed ({endpoint})")
-
-        # Step 4: Gateway verify
-        c.print("\n[bold]Step 4/4[/] — LLM Gateway connectivity")
-        if skip_gateway:
-            c.print("[dim]Skipped gateway check (--skip-gateway)[/]")
-            result.gateway_ok = True
-        else:
-            with c.status("[bold]Testing LLM Gateway..."):
-                from superrobot.setup.checks import check_gateway
-
-                result.gateway_ok, result.gateway_error = await check_gateway()
-            if result.gateway_ok:
-                c.print("[green]✓[/] LLM Gateway reachable")
-            else:
-                c.print(f"[red]✗[/] Gateway check failed: {result.gateway_error}")
-                c.print("[yellow]You can retry later with:[/] superrobot setup --check")
-                return result
-
-        mark_setup_complete(endpoint, model=model)
-        c.print(
-            Panel.fit(
-                "[bold green]Setup complete![/]\n\n"
-                "Next steps:\n"
-                "  [bold]superrobot import ./your-agent[/]  — migrate an existing agent\n"
-                "  [bold]superrobot new[/]                  — build from scratch\n"
-                "  [bold]superrobot template[/]              — start from a DR template",
-                border_style="green",
-            )
-        )
-        return result
-
-    def _print_prerequisites(self, result: SetupCheckResult) -> None:
-        c = self.console
-        assert c is not None
-        table = Table(show_header=True, header_style="bold")
-        table.add_column("Tool", style="cyan")
-        table.add_column("Status")
-        table.add_column("Install")
-        for prereq in result.prerequisites:
-            status = "[green]✓ installed[/]" if prereq.installed else "[red]✗ missing[/]"
-            table.add_row(prereq.name, status, prereq.install_hint if not prereq.installed else "")
-        c.print(table)
-
-    def _prompt_environment(self) -> tuple[str, str, str]:
-        c = self.console
-        assert c is not None
-        c.print("\n[bold]DataRobot environment[/]")
-        c.print("  [1] Production — https://app.datarobot.com")
-        c.print("  [2] Staging    — https://staging.datarobot.com")
-        c.print("  [3] Custom URL")
-        choice = Prompt.ask("Select", choices=["1", "2", "3"], default="1", console=c)
+    if not non_interactive and not selected_endpoint:
+        out.print("[bold]SuperRobot setup[/] — DataRobot environment")
+        out.print("1) production  2) staging  3) custom")
+        choice = input("Choose [1]: ").strip() or "1"
         if choice == "2":
-            endpoint = ENDPOINT_PRESETS["staging"]
+            selected_endpoint = ENDPOINT_PRESETS["staging"]
         elif choice == "3":
-            default_endpoint = os.environ.get("DATAROBOT_ENDPOINT", ENDPOINT_PRESETS["production"])
-            endpoint = Prompt.ask(
-                "DataRobot Platform API URL (NOT prediction URL)",
-                default=default_endpoint,
-                console=c,
-            )
+            selected_endpoint = input("Platform URL: ").strip()
         else:
-            endpoint = ENDPOINT_PRESETS["production"]
-        token = os.environ.get("DATAROBOT_API_TOKEN", "")
-        if token:
-            use_existing = Confirm.ask(
-                "Use existing DATAROBOT_API_TOKEN from environment?",
-                console=c,
-            )
-            if not use_existing:
-                token = ""
-        if not token:
-            token = Prompt.ask("DataRobot API token", password=True, console=c)
-        model = Prompt.ask(
-            "LLM model",
-            default=os.environ.get("SUPERROBOT_MODEL", DEFAULT_MODEL),
-            console=c,
-        )
-        return api_endpoint(endpoint), token.strip(), model.strip()
+            selected_endpoint = ENDPOINT_PRESETS["production"]
 
-    async def _run_auth_login(self, endpoint: str | None = None) -> bool:
-        """Run dr auth login with inherited stdio, targeting the given endpoint URL."""
-        args = ["auth", "login"]
-        if endpoint:
-            args.append(normalize_endpoint(endpoint))
-        proc = await asyncio.create_subprocess_exec(
-            "dr",
-            *args,
-            stdin=sys.stdin,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
-        await proc.wait()
-        if proc.returncode != 0:
-            return False
-        return await self.cli.auth_check() if self.cli else False
+    if not selected_endpoint:
+        out.print("[red]Endpoint required[/]")
+        return DoctorResult(ready=False, checks=(("endpoint", False, "missing"),))
+
+    normalized = normalize_endpoint(selected_endpoint)
+    api = api_endpoint(normalized)
+    out.print(f"[dim]Endpoint[/] {api}")
+
+    auth = await check_dr_auth()
+    auth_method = AuthMethod.NONE
+    if auth.ok:
+        auth_method = AuthMethod.DR_CLI
+        out.print("[green]✓[/] dr auth check passed")
+    else:
+        out.print(f"[yellow]dr auth[/] {auth.detail}")
+        if not selected_token and not non_interactive:
+            selected_token = input(
+                "Paste DATAROBOT_API_TOKEN (or leave blank to run dr auth login): "
+            ).strip()
+        if selected_token:
+            auth_method = AuthMethod.API_TOKEN
+        elif not non_interactive:
+            out.print("Run: [cyan]dr auth login[/] " + normalized)
+            return DoctorResult(ready=False, checks=(("auth", False, "login required"),))
+
+    if not selected_token and auth_method is AuthMethod.DR_CLI:
+        # Token still useful for Gateway HTTP probes; allow env-only
+        selected_token = os.environ.get("DATAROBOT_API_TOKEN", "")
+
+    if not selected_token:
+        out.print("[red]API token required for Gateway verification[/]")
+        return DoctorResult(ready=False, checks=(("auth", False, "token required"),))
+
+    if not skip_gateway:
+        await verify_gateway(normalized, selected_token, model=selected_model)
+        out.print("[green]✓[/] LLM Gateway verified")
+
+    capabilities = await probe_capabilities(normalized, selected_token)
+    state = SetupState(
+        endpoint=normalized,
+        auth_method=auth_method,
+        capabilities=capabilities,
+        model=selected_model,
+    )
+    save_state(state, config_root)
+    write_token_env(
+        endpoint=api,
+        token=selected_token,
+        model=selected_model,
+        root=config_root,
+    )
+    os.environ["DATAROBOT_ENDPOINT"] = api
+    os.environ["DATAROBOT_API_TOKEN"] = selected_token
+    os.environ["SUPERROBOT_MODEL"] = selected_model
+    out.print("[green]✓[/] Setup saved")
+    root = str(config_root) if config_root else None
+    return await run_doctor(config_root=root, skip_gateway=True)

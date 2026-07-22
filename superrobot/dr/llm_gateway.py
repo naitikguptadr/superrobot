@@ -20,8 +20,22 @@ MAX_RETRIES = 3
 BASE_DELAY = 2.0
 
 
+def ensure_credentials_loaded() -> None:
+    """Hydrate process env from ~/.config/superrobot/.env when unset."""
+    if (
+        os.environ.get("DATAROBOT_ENDPOINT", "").strip()
+        and os.environ.get("DATAROBOT_API_TOKEN", "").strip()
+    ):
+        return
+    from superrobot.setup.config import load_env_file
+
+    for key, value in load_env_file().items():
+        os.environ.setdefault(key, value)
+
+
 def has_llm_credentials() -> bool:
     """True when DR platform endpoint and API token are configured."""
+    ensure_credentials_loaded()
     endpoint = os.environ.get("DATAROBOT_ENDPOINT", "").strip()
     token = os.environ.get("DATAROBOT_API_TOKEN", "").strip()
     return bool(endpoint and token)
@@ -43,16 +57,23 @@ class LLMGateway:
     """DR LLM Gateway client with retries and structured output validation."""
 
     def __init__(self, model: str | None = None) -> None:
-        from superrobot.setup.constants import normalize_endpoint
+        from superrobot.setup.endpoints import EndpointError, gateway_base_url, normalize_endpoint
 
-        self._endpoint = normalize_endpoint(os.environ.get("DATAROBOT_ENDPOINT", ""))
+        ensure_credentials_loaded()
+        raw_endpoint = os.environ.get("DATAROBOT_ENDPOINT", "").strip()
+        self._endpoint = ""
+        if raw_endpoint:
+            try:
+                self._endpoint = normalize_endpoint(raw_endpoint)
+            except EndpointError:
+                self._endpoint = ""
         self._token = os.environ.get("DATAROBOT_API_TOKEN", "").strip()
         self._model = model or os.environ.get("SUPERROBOT_MODEL", DEFAULT_MODEL)
         self._debug = os.environ.get("SUPERROBOT_DEBUG", "") == "1"
         self._client: AsyncOpenAI | None = None
-        if has_llm_credentials():
+        if self._endpoint and self._token:
             self._client = AsyncOpenAI(
-                base_url=f"{self._endpoint}/api/v2/genai/llmgw",
+                base_url=gateway_base_url(self._endpoint),
                 api_key=self._token,
             )
 

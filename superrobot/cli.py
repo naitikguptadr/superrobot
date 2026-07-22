@@ -1,399 +1,771 @@
-"""Typer entry point — arg parsing and TUI launch."""
+"""SuperRobot CLI — DataRobot-native control plane."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import sys
+import os
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from superrobot import __version__
-from superrobot.app import SuperRobotApp
-from superrobot.env import load_user_env
-from superrobot.live import run_live_query
-from superrobot.pipeline.analyzer import analyze
-from superrobot.pipeline.config_generator import (
-    generate_config,
-    render_files,
-    write_generated_files,
-)
-from superrobot.pipeline.deployer import deploy
-from superrobot.pipeline.evaluator import run_eval
-from superrobot.pipeline.scanner import scan
-from superrobot.pipeline.ui_generator import generate_ui_component
-from superrobot.repo import clone_repository
-from superrobot.setup.checks import run_all_checks
-from superrobot.setup.runner import SetupRunner
-from superrobot.setup.state import is_setup_complete
-from superrobot.startup import check_prerequisites, print_missing_prerequisites
-from superrobot.tui.setup_app import SetupApp
+from superrobot.setup.doctor import run_doctor
+from superrobot.setup.runner import run_setup
 
-load_user_env()
-
-app = typer.Typer(
-    name="superrobot",
-    help="Bring any Python agent to DataRobot without rebuilding it from scratch.",
-    no_args_is_help=True,
-)
+if TYPE_CHECKING:
+    from superrobot.models.gap_result import GapReport
+    from superrobot.models.receipt import Receipt
+    from superrobot.setup.models import SetupState
 
 console = Console()
-
-
-def _ensure_prerequisites() -> None:
-    missing = check_prerequisites()
-    if missing:
-        print_missing_prerequisites(missing)
-
-
-def _ensure_auth(no_tui: bool) -> None:
-    async def _check() -> bool:
-        from superrobot.startup import check_auth
-
-        return await check_auth()
-
-    if not asyncio.run(_check()):
-        msg = "Auth failed. Run: dr auth login  (or: superrobot setup)"
-        if no_tui:
-            print(msg, file=sys.stderr)
-        else:
-            typer.echo(msg, err=True)
-        raise typer.Exit(1)
-
-
-def _ensure_setup(*, strict: bool = True) -> None:
-    """Warn or exit if setup has not been completed."""
-    if is_setup_complete():
-        return
-    msg = "Setup incomplete. Run: superrobot setup"
-    if strict:
-        console.print(f"[yellow]{msg}[/]")
-        raise typer.Exit(1)
-    console.print(f"[dim]{msg}[/]")
-
-
-@app.command("setup")
-def setup_cmd(
-    check_only: Annotated[bool, typer.Option("--check", help="Verify setup only")] = False,
-    no_tui: Annotated[
-        bool, typer.Option("--no-tui", help="Use Rich prompts instead of TUI")
-    ] = False,
-    skip_gateway: Annotated[
-        bool, typer.Option("--skip-gateway", help="Skip LLM gateway test")
-    ] = False,
-) -> None:
-    """Interactive first-run setup — tools, auth, credentials, gateway verify."""
-    if check_only:
-        result = asyncio.run(run_all_checks())
-        _print_setup_status(result)
-        raise typer.Exit(0 if result.is_ready else 1)
-
-    if no_tui:
-        result = asyncio.run(SetupRunner(console=console).run(skip_gateway=skip_gateway))
-        raise typer.Exit(0 if result.is_ready else 1)
-
-    SetupApp().run()
-
-
-def _print_setup_status(result: object) -> None:
-    from superrobot.setup.checks import SetupCheckResult
-
-    assert isinstance(result, SetupCheckResult)
-    table_items = [
-        ("Prerequisites", result.prerequisites_ok),
-        ("dr auth", result.auth_ok),
-        ("Environment", result.env_ok),
-        ("LLM Gateway", result.gateway_ok),
-    ]
-    for label, ok in table_items:
-        icon = "[green]✓[/]" if ok else "[red]✗[/]"
-        console.print(f"  {icon} {label}")
-    if result.gateway_error:
-        console.print(f"  [dim]Gateway: {result.gateway_error}[/]")
-    if result.is_ready:
-        console.print("\n[green]Setup complete — ready to use SuperRobot.[/]")
-    else:
-        console.print("\n[yellow]Run superrobot setup to finish configuration.[/]")
-
-
-@app.command("import")
-def import_cmd(
-    source: Annotated[str, typer.Argument(help="GitHub URL or local path")],
-    skip_eval: Annotated[bool, typer.Option("--skip-eval")] = False,
-    output_dir: Annotated[str | None, typer.Option("--output-dir", "-o")] = None,
-    model: Annotated[str | None, typer.Option("--model")] = None,
-    debug: Annotated[bool, typer.Option("--debug")] = False,
-    no_tui: Annotated[bool, typer.Option("--no-tui")] = False,
-    skip_setup_check: Annotated[bool, typer.Option("--skip-setup-check")] = False,
-    skip_auth_check: Annotated[
-        bool, typer.Option("--skip-auth-check", help="Skip dr auth (local/CI only)")
-    ] = False,
-) -> None:
-    """Brownfield import: full Scan → Deploy pipeline."""
-    if not skip_setup_check:
-        _ensure_setup()
-    _ensure_prerequisites()
-    if not skip_auth_check:
-        _ensure_auth(no_tui)
-    if debug:
-        import os
-
-        os.environ["SUPERROBOT_DEBUG"] = "1"
-    if model:
-        import os
-
-        os.environ["SUPERROBOT_MODEL"] = model
-
-    repo_path = asyncio.run(_resolve_source(source))
-    if no_tui:
-        asyncio.run(_run_import_headless(repo_path, output_dir, skip_eval))
-        return
-
-    SuperRobotApp(
-        repo_path=repo_path,
-        mode="import",
-        skip_eval=skip_eval,
-        output_dir=output_dir,
-    ).run()
-
-
-@app.command("new")
-def new_cmd(
-    skip_eval: Annotated[bool, typer.Option("--skip-eval")] = False,
-    no_tui: Annotated[bool, typer.Option("--no-tui")] = False,
-    skip_setup_check: Annotated[bool, typer.Option("--skip-setup-check")] = False,
-) -> None:
-    """Greenfield: wizard → generate → deploy."""
-    if not skip_setup_check:
-        _ensure_setup()
-    _ensure_prerequisites()
-    _ensure_auth(no_tui)
-    if no_tui:
-        typer.echo("Greenfield mode requires TUI for wizard questions.")
-        raise typer.Exit(1)
-    SuperRobotApp(mode="greenfield", skip_eval=skip_eval).run()
-
-
-@app.command()
-def template(
-    skip_eval: Annotated[bool, typer.Option("--skip-eval")] = False,
-    no_tui: Annotated[bool, typer.Option("--no-tui")] = False,
-    skip_setup_check: Annotated[bool, typer.Option("--skip-setup-check")] = False,
-) -> None:
-    """Browse DR templates → customize → deploy."""
-    if not skip_setup_check:
-        _ensure_setup()
-    _ensure_prerequisites()
-    _ensure_auth(no_tui)
-    if no_tui:
-        typer.echo("Template mode requires TUI for template browser.")
-        raise typer.Exit(1)
-    SuperRobotApp(mode="template", skip_eval=skip_eval).run()
-
-
-@app.command("scan")
-def scan_cmd(
-    path: Annotated[str, typer.Argument(help="Local repo path")],
-) -> None:
-    """Stage 1 only: output ScanResult JSON."""
-    result = scan(path)
-    typer.echo(result.model_dump_json(indent=2))
-
-
-@app.command("analyze")
-def analyze_cmd(
-    path: Annotated[str, typer.Argument(help="Local repo path")],
-) -> None:
-    """Stages 1-2: output AnalysisResult JSON."""
-    scan_result = scan(path)
-    result = asyncio.run(analyze(scan_result))
-    typer.echo(result.model_dump_json(indent=2))
-
-
-@app.command()
-def generate(
-    path: Annotated[str, typer.Argument(help="Local repo path")],
-    output_dir: Annotated[str, typer.Option("--output-dir", "-o")] = "./output",
-) -> None:
-    """Stages 1-3: write generated files to --output-dir."""
-    scan_result = scan(path)
-    analysis_result = asyncio.run(analyze(scan_result))
-    config = generate_config(scan_result, analysis_result)
-    files = render_files(config)
-    out = write_generated_files(files, output_dir)
-    typer.echo(f"Generated files written to {out}")
-
-
-@app.command("eval")
-def eval_cmd(
-    path: Annotated[str, typer.Option("--path", "-p")] = ".",
-    bundle: Annotated[
-        str | None,
-        typer.Option("--bundle", help="Generated bundle dir to eval (default: <path>/.superrobot)"),
-    ] = None,
-) -> None:
-    """Run 5-shot pre-deploy eval."""
-    scan_result = scan(path)
-    analysis_result = asyncio.run(analyze(scan_result))
-    cwd = bundle or str(Path(path) / ".superrobot")
-    if not Path(cwd).exists():
-        cwd = path
-    summary = asyncio.run(
-        run_eval(analysis_result, cwd=cwd, entry=_entry_info_from_scan(scan_result))
-    )
-    typer.echo(summary.model_dump_json(indent=2))
-
-
-def _entry_info_from_scan(scan_result: object) -> tuple[str, str, list[str]] | None:
-    from superrobot.models.agent_config import parse_signature_params
-    from superrobot.models.scan_result import ScanResult
-    from superrobot.pipeline.config_generator import flat_module_name
-
-    assert isinstance(scan_result, ScanResult)
-    if not scan_result.entry_points:
-        return None
-    ep = scan_result.entry_points[0]
-    module = flat_module_name(scan_result.repo_path, ep.file)
-    return (module, ep.function, parse_signature_params(ep.signature))
-
-
-@app.command("deploy")
-def deploy_cmd(
-    path: Annotated[str, typer.Option("--path", "-p")] = ".",
-) -> None:
-    """Run deploy against current generated config."""
-    result = asyncio.run(deploy(cwd=path))
-    if not result.success:
-        typer.echo(result.error_message or "Deploy failed", err=True)
-        raise typer.Exit(1)
-    typer.echo("Deploy succeeded")
-
-
-@app.command()
-def live(
-    path: Annotated[str, typer.Option("--path", "-p", help="Agent project directory")] = ".",
-    query: Annotated[str, typer.Option("--query", "-q")] = "Hello, test query",
-) -> None:
-    """Attach to locally running agent and show execution result."""
-    _ensure_prerequisites()
-    result = asyncio.run(run_live_query(query, cwd=path))
-    if result.success:
-        typer.echo(result.output)
-        typer.echo(f"\nExecution path: {' → '.join(result.active_nodes)}", err=True)
-    else:
-        typer.echo(result.stderr or "Live run failed", err=True)
-        raise typer.Exit(1)
-
-
-@app.command()
-def diff(
-    config_a: Annotated[str, typer.Argument()],
-    config_b: Annotated[str, typer.Argument()],
-) -> None:
-    """Compare two agent configs side by side."""
-    import difflib
-
-    for p in (config_a, config_b):
-        if not Path(p).is_file():
-            raise typer.BadParameter(f"File not found: {p}")
-    a = Path(config_a).read_text()
-    b = Path(config_b).read_text()
-    if a == b:
-        typer.echo("Configs are identical")
-        return
-    diff_lines = difflib.unified_diff(
-        a.splitlines(), b.splitlines(), fromfile=config_a, tofile=config_b, lineterm=""
-    )
-    for line in diff_lines:
-        typer.echo(line)
-    raise typer.Exit(1)
+app = typer.Typer(
+    name="superrobot",
+    help="Bring any Python agent to DataRobot — migrate, validate, deploy, operate.",
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+)
 
 
 def _version_callback(value: bool) -> None:
     if value:
-        typer.echo(f"superrobot {__version__}")
+        console.print(f"superrobot {__version__}")
         raise typer.Exit()
 
 
 @app.callback()
 def main(
     version: Annotated[
-        bool,
+        bool | None,
         typer.Option("--version", "-V", callback=_version_callback, is_eager=True),
-    ] = False,
+    ] = None,
 ) -> None:
-    """SuperRobot — bring any Python agent to DataRobot."""
+    """SuperRobot — DataRobot-native brownfield control plane."""
 
 
-ui_app = typer.Typer(help="dr-ui component builder")
-app.add_typer(ui_app, name="ui")
-
-
-@ui_app.command("add")
-def ui_add(
-    description: Annotated[str, typer.Argument(help="Component description")],
-    path: Annotated[str, typer.Option("--path", "-p")] = ".",
-    preview: Annotated[
-        bool, typer.Option("--preview", help="Write ui/preview.html and open it in a browser")
-    ] = False,
-    output_dir: Annotated[str | None, typer.Option("--output-dir", "-o")] = None,
+@app.command("doctor")
+def doctor_cmd(
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+    skip_gateway: Annotated[bool, typer.Option("--skip-gateway")] = False,
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
 ) -> None:
-    """Generate a dr-ui component from description."""
-    _ensure_prerequisites()
-    scan_result = scan(path)
-    analysis_result = asyncio.run(analyze(scan_result))
-    tsx = asyncio.run(generate_ui_component(description, analysis_result))
-    typer.echo(tsx)
-    if preview or output_dir:
-        import webbrowser
-
-        from superrobot.pipeline.ui_preview import write_preview
-
-        out = output_dir or path
-        (Path(out) / "ui").mkdir(parents=True, exist_ok=True)
-        (Path(out) / "ui" / "component.tsx").write_text(tsx)
-        preview_path = write_preview(tsx, out)
-        typer.echo(f"\nLive preview: {preview_path}", err=True)
-        if preview:
-            webbrowser.open(f"file://{preview_path}")
-
-
-async def _run_import_headless(repo_path: str, output_dir: str | None, skip_eval: bool) -> None:
-    scan_result = scan(repo_path)
-    print(json.dumps({"stage": "scan", "result": scan_result.model_dump()}, indent=2))
-
-    analysis_result = await analyze(scan_result)
-    print(json.dumps({"stage": "analyze", "result": analysis_result.model_dump()}, indent=2))
-
-    config = generate_config(scan_result, analysis_result)
-    files = render_files(config)
-    out = write_generated_files(files, output_dir or f"{repo_path}/.superrobot")
-    generate_payload = {
-        "stage": "generate",
-        "output_dir": str(out),
-        "files": list(files.keys()),
-    }
-    print(json.dumps(generate_payload, indent=2))
-
-    if not skip_eval:
-        summary = await run_eval(
-            analysis_result, cwd=str(out), entry=_entry_info_from_scan(scan_result)
+    """Health check — endpoint, auth, LLM Gateway, capabilities."""
+    result = asyncio.run(
+        run_doctor(
+            config_root=str(config_dir) if config_dir else None,
+            skip_gateway=skip_gateway,
         )
-        print(json.dumps({"stage": "eval", "result": summary.model_dump()}, indent=2))
+    )
+    if json_out:
+        console.print_json(
+            json.dumps(
+                {
+                    "ready": result.ready,
+                    "checks": [{"name": n, "ok": ok, "detail": d} for n, ok, d in result.checks],
+                    "state": result.state.to_dict() if result.state else None,
+                }
+            )
+        )
+    else:
+        table = Table(title="SuperRobot doctor")
+        table.add_column("Check")
+        table.add_column("Status")
+        table.add_column("Detail")
+        for name, ok, detail in result.checks:
+            table.add_row(name, "[green]ok[/]" if ok else "[red]fail[/]", detail)
+        console.print(table)
+        console.print(
+            "[green]● ready[/]" if result.ready else "[yellow]● not ready — run superrobot setup[/]"
+        )
+    raise typer.Exit(0 if result.ready else 1)
 
 
-async def _resolve_source(source: str) -> str:
-    path = Path(source)
-    if path.exists():
-        return str(path.resolve())
-    if source.startswith("http") or "github.com" in source:
-        cloned = await clone_repository(source)
-        return str(cloned)
-    msg = f"Path not found: {source}"
-    raise typer.BadParameter(msg)
+@app.command("setup")
+def setup_cmd(
+    endpoint: Annotated[str | None, typer.Option("--endpoint")] = None,
+    token: Annotated[str | None, typer.Option("--token", envvar="DATAROBOT_API_TOKEN")] = None,
+    model: Annotated[str | None, typer.Option("--model")] = None,
+    skip_gateway: Annotated[bool, typer.Option("--skip-gateway")] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="Non-interactive")] = False,
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
+) -> None:
+    """First-run wizard — DataRobot endpoint, auth, Gateway verify, capability probe."""
+    result = asyncio.run(
+        run_setup(
+            console=console,
+            config_root=config_dir,
+            endpoint=endpoint,
+            token=token,
+            model=model,
+            skip_gateway=skip_gateway,
+            non_interactive=yes,
+        )
+    )
+    raise typer.Exit(0 if result.ready else 1)
+
+
+@app.command("status")
+def status_cmd(
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
+) -> None:
+    """One-line readiness."""
+    result = asyncio.run(
+        run_doctor(
+            config_root=str(config_dir) if config_dir else None,
+            skip_gateway=True,
+        )
+    )
+    if result.ready:
+        console.print("[green]●[/] SuperRobot ready")
+        raise typer.Exit(0)
+    console.print("[yellow]●[/] Setup incomplete — run [cyan]superrobot setup[/]")
+    raise typer.Exit(1)
+
+
+@app.command("scan")
+def scan_cmd(
+    source: Annotated[str, typer.Argument(help="Local path or GitHub URL")],
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Stage 1 — static scan; emit ScanResult."""
+    from superrobot.engine.pipeline import TransformEngine
+
+    engine = TransformEngine()
+    repo = asyncio.run(engine.resolve_source(source))
+    result = engine.run_scan(repo)
+    if json_out:
+        console.print_json(result.model_dump_json())
+    else:
+        console.print(
+            f"[cyan]framework[/]={result.detected_framework} "
+            f"[cyan]confidence[/]={result.confidence:.0%} "
+            f"[cyan]entries[/]={len(result.entry_points)}"
+        )
+    raise typer.Exit(0)
+
+
+@app.command("analyze")
+def analyze_cmd(
+    source: Annotated[str, typer.Argument(help="Local path or GitHub URL")],
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Stages 1–2 — scan + analyze; emit AnalysisResult."""
+    from superrobot.engine.pipeline import TransformEngine
+
+    engine = TransformEngine()
+
+    async def _run() -> None:
+        repo = await engine.resolve_source(source)
+        scan = engine.run_scan(repo)
+        analysis = await engine.run_analyze(scan)
+        if json_out:
+            console.print_json(analysis.model_dump_json())
+        else:
+            console.print(
+                f"[cyan]purpose[/]={analysis.agent_purpose}\n"
+                f"[cyan]framework[/]={analysis.dr_framework.value} "
+                f"[cyan]confidence[/]={analysis.confidence:.0%}"
+            )
+
+    asyncio.run(_run())
+    raise typer.Exit(0)
+
+
+@app.command("generate")
+def generate_cmd(
+    source: Annotated[str, typer.Argument(help="Local path or GitHub URL")],
+    output_dir: Annotated[Path, typer.Option("--output-dir", "-o")],
+    framework: Annotated[str | None, typer.Option("--framework")] = None,
+) -> None:
+    """Stages 1–3 — write Agent App packaging into --output-dir."""
+    from superrobot.engine.pipeline import TransformEngine
+
+    engine = TransformEngine()
+
+    async def _run() -> None:
+        ctx = await engine.transform(
+            source,
+            output_dir=output_dir,
+            skip_eval=True,
+            skip_deploy=True,
+            framework=framework,
+        )
+        console.print(f"[green]wrote[/] {len(ctx.files)} files → {ctx.output_dir}")
+
+    asyncio.run(_run())
+    raise typer.Exit(0)
+
+
+@app.command("transform")
+def transform_cmd(
+    source: Annotated[str, typer.Argument(help="Local path or GitHub URL")],
+    output_dir: Annotated[Path | None, typer.Option("--output-dir", "-o")] = None,
+    skip_eval: Annotated[bool, typer.Option("--skip-eval")] = False,
+    framework: Annotated[str | None, typer.Option("--framework")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Full brownfield transform (Scan → Analyze → Generate → Eval)."""
+    from superrobot.engine.pipeline import TransformEngine
+
+    engine = TransformEngine()
+
+    async def _run() -> None:
+        ctx = await engine.transform(
+            source,
+            output_dir=output_dir,
+            skip_eval=skip_eval,
+            skip_deploy=True,
+            framework=framework,
+        )
+        payload = {
+            "repo_path": ctx.repo_path,
+            "output_dir": str(ctx.output_dir),
+            "scan": ctx.scan.model_dump() if ctx.scan else None,
+            "analysis": ctx.analysis.model_dump() if ctx.analysis else None,
+            "files": sorted(ctx.files.keys()),
+            "eval": ctx.eval_summary.model_dump() if ctx.eval_summary else None,
+        }
+        if json_out:
+            console.print_json(json.dumps(payload, default=str))
+        else:
+            console.print(f"[green]transform complete[/] files={len(ctx.files)} → {ctx.output_dir}")
+
+    asyncio.run(_run())
+    raise typer.Exit(0)
+
+
+@app.command("validate")
+def validate_cmd(
+    path: Annotated[Path, typer.Argument(help="Generated package directory")],
+    source: Annotated[
+        Path | None,
+        typer.Option("--source", help="Original repo — enables the pyproject-removal check"),
+    ] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Gap Analysis — platform-rule findings, blocking vs. warning."""
+    from superrobot.pipeline.gap_analysis import run_gap_analysis
+
+    if not path.is_dir():
+        console.print(f"[red]Not a directory[/] {path}")
+        raise typer.Exit(2)
+
+    report = run_gap_analysis(path, source_repo=source)
+    if json_out:
+        console.print_json(report.model_dump_json())
+    else:
+        _print_gap_findings(report)
+    raise typer.Exit(1 if report.blocking else 0)
+
+
+def _print_gap_findings(report: GapReport) -> None:
+    if not report.findings:
+        console.print("[green]no gaps found[/]")
+        return
+    for finding in report.findings:
+        color = "red" if finding.severity == "blocking" else "yellow"
+        location = f" ({finding.file})" if finding.file else ""
+        console.print(f"[{color}]{finding.severity}[/] {finding.rule}: {finding.message}{location}")
+    if report.blocking:
+        console.print(
+            f"[red]{len(report.blocking)} blocking finding(s)[/] — deploy refuses without --waive"
+        )
+
+
+@app.command("deploy")
+def deploy_cmd(
+    path: Annotated[Path, typer.Argument(help="Generated package directory")],
+    target: Annotated[
+        str,
+        typer.Option("--target", help="Deploy target: agent-app or workload"),
+    ] = "agent-app",
+    has_ui: Annotated[bool, typer.Option("--has-ui")] = False,
+    image_uri: Annotated[
+        str | None, typer.Option("--image-uri", help="Built container image (workload target)")
+    ] = None,
+    secret: Annotated[
+        list[str] | None,
+        typer.Option("--secret", help="KEY=credential:<id> (workload target, repeatable)"),
+    ] = None,
+    waive: Annotated[
+        bool, typer.Option("--waive", help="Proceed despite blocking Gap Analysis findings")
+    ] = False,
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Deploy generated packaging to DataRobot Agent App or the Workload API."""
+    if target not in {"agent-app", "workload"}:
+        console.print(
+            f"[red]Unsupported target[/] {target!r} — use [cyan]agent-app[/] or [cyan]workload[/]"
+        )
+        raise typer.Exit(2)
+    if not path.is_dir():
+        console.print(f"[red]Not a directory[/] {path}")
+        raise typer.Exit(2)
+
+    if target == "agent-app":
+        raise typer.Exit(
+            asyncio.run(
+                _deploy_agent_app(
+                    path, has_ui=has_ui, waive=waive, config_dir=config_dir, json_out=json_out
+                )
+            )
+        )
+    raise typer.Exit(
+        asyncio.run(
+            _deploy_workload(
+                path,
+                image_uri=image_uri,
+                secrets=secret,
+                waive=waive,
+                config_dir=config_dir,
+                json_out=json_out,
+            )
+        )
+    )
+
+
+def _resolve_credentials(config_dir: Path | None) -> tuple[str, str, SetupState | None]:
+    """Endpoint, token, and persisted SetupState — same resolution order as doctor."""
+    from superrobot.setup.config import load_env_file, load_state
+
+    env = load_env_file(config_dir)
+    state = load_state(config_dir)
+    endpoint = (
+        env.get("DATAROBOT_ENDPOINT")
+        or (state.endpoint if state else "")
+        or os.environ.get("DATAROBOT_ENDPOINT", "")
+    )
+    token = env.get("DATAROBOT_API_TOKEN") or os.environ.get("DATAROBOT_API_TOKEN", "")
+    return endpoint, token, state
+
+
+def _resolve_model(config_dir: Path | None) -> str:
+    from superrobot.dr.llm_gateway import DEFAULT_MODEL
+
+    _, _, state = _resolve_credentials(config_dir)
+    return (state.model if state else "") or os.environ.get("SUPERROBOT_MODEL", DEFAULT_MODEL)
+
+
+def _record_receipt(
+    *,
+    target: str,
+    action: str,
+    success: bool,
+    config_dir: Path | None,
+    manifest_dir: Path,
+    gap_report: GapReport | None = None,
+    waived: bool = False,
+    error_message: str | None = None,
+    image_uri: str | None = None,
+    has_ui: bool = False,
+    replaces: str | None = None,
+) -> None:
+    import uuid
+    from datetime import UTC, datetime
+
+    from superrobot.models.receipt import Receipt
+    from superrobot.pipeline.receipts import save_receipt
+
+    gap_summary = {
+        "blocking": len(gap_report.blocking) if gap_report else 0,
+        "warnings": len(gap_report.warnings) if gap_report else 0,
+    }
+    waived_findings = (
+        [f.message for f in gap_report.blocking]
+        if gap_report and waived and gap_report.blocking
+        else []
+    )
+    receipt = Receipt(
+        id=uuid.uuid4().hex[:12],
+        created_at=datetime.now(UTC).isoformat(),
+        target=target,  # type: ignore[arg-type]
+        action=action,  # type: ignore[arg-type]
+        success=success,
+        model=_resolve_model(config_dir),
+        gap_summary=gap_summary,
+        waived_findings=waived_findings,
+        error_message=error_message,
+        replaces=replaces,
+        manifest_dir=str(manifest_dir),
+        image_uri=image_uri,
+        has_ui=has_ui,
+    )
+    save_receipt(receipt, config_dir)
+
+
+def _gap_gate(
+    path: Path,
+    *,
+    waive: bool,
+    json_out: bool,
+    target: str,
+    config_dir: Path | None,
+    image_uri: str | None = None,
+    has_ui: bool = False,
+    replaces: str | None = None,
+) -> GapReport | None:
+    """Run Gap Analysis; print findings; record+return None if deploy is blocked."""
+    from superrobot.pipeline.gap_analysis import run_gap_analysis
+
+    report = run_gap_analysis(path)
+    if report.blocking and not waive:
+        if json_out:
+            console.print_json(
+                json.dumps(
+                    {
+                        "success": False,
+                        "target": target,
+                        "blocked_by_gap_analysis": True,
+                        "findings": [f.model_dump() for f in report.blocking],
+                    }
+                )
+            )
+        else:
+            _print_gap_findings(report)
+            console.print("[red]Deploy refused[/] — fix blocking findings or pass --waive")
+        _record_receipt(
+            target=target,
+            action="blocked",
+            success=False,
+            config_dir=config_dir,
+            manifest_dir=path,
+            gap_report=report,
+            error_message="; ".join(f.message for f in report.blocking),
+            image_uri=image_uri,
+            has_ui=has_ui,
+            replaces=replaces,
+        )
+        return None
+    if report.findings and not json_out:
+        _print_gap_findings(report)
+    return report
+
+
+async def _deploy_agent_app(
+    path: Path,
+    *,
+    has_ui: bool,
+    waive: bool,
+    config_dir: Path | None,
+    json_out: bool,
+    replaces: str | None = None,
+) -> int:
+    from superrobot.pipeline.deployer import DEPLOY_WARNINGS, deploy
+
+    gap_report = _gap_gate(
+        path,
+        waive=waive,
+        json_out=json_out,
+        target="agent-app",
+        config_dir=config_dir,
+        has_ui=has_ui,
+        replaces=replaces,
+    )
+    if gap_report is None:
+        return 1
+
+    for warning in DEPLOY_WARNINGS:
+        if not has_ui and "Frontend" in warning:
+            continue
+        console.print(f"[yellow]![/] {warning}")
+
+    result = await deploy(cwd=str(path), has_ui=has_ui)
+    payload = {
+        "success": result.success,
+        "target": "agent-app",
+        "warnings": result.warnings,
+        "error_message": result.error_message,
+    }
+    if json_out:
+        console.print_json(json.dumps(payload))
+    elif result.success:
+        console.print("[green]deploy succeeded[/]")
+    else:
+        console.print(f"[red]deploy failed[/] {result.error_message or ''}")
+    _record_receipt(
+        target="agent-app",
+        action="deployed" if result.success else "failed",
+        success=result.success,
+        config_dir=config_dir,
+        manifest_dir=path,
+        gap_report=gap_report,
+        waived=bool(gap_report.blocking),
+        error_message=result.error_message,
+        has_ui=has_ui,
+        replaces=replaces,
+    )
+    return 0 if result.success else 1
+
+
+async def _deploy_workload(
+    path: Path,
+    *,
+    image_uri: str | None,
+    secrets: list[str] | None,
+    waive: bool,
+    config_dir: Path | None,
+    json_out: bool,
+    replaces: str | None = None,
+) -> int:
+    from superrobot.pipeline.workload_deployer import deploy_workload
+
+    if not image_uri:
+        console.print("[red]--image-uri is required for --target workload[/]")
+        return 2
+
+    secret_map: dict[str, str] = {}
+    for item in secrets or []:
+        if "=" not in item:
+            console.print(f"[red]Invalid --secret[/] {item!r} — expected KEY=VALUE")
+            return 2
+        key, value = item.split("=", maxsplit=1)
+        secret_map[key] = value
+
+    endpoint, token, state = _resolve_credentials(config_dir)
+    if not endpoint or not token:
+        console.print("[red]Not authenticated[/] — run [cyan]superrobot setup[/]")
+        return 1
+    if not state or not state.capabilities.workload:
+        console.print(
+            "[red]Workload API not entitled on this account[/] — "
+            "run [cyan]superrobot doctor[/] to re-probe capabilities"
+        )
+        return 1
+
+    gap_report = _gap_gate(
+        path,
+        waive=waive,
+        json_out=json_out,
+        target="workload",
+        config_dir=config_dir,
+        image_uri=image_uri,
+        replaces=replaces,
+    )
+    if gap_report is None:
+        return 1
+
+    result = await deploy_workload(
+        manifest_dir=str(path),
+        image_uri=image_uri,
+        endpoint=endpoint,
+        token=token,
+        secrets=secret_map,
+    )
+    payload = {
+        "success": result.success,
+        "target": "workload",
+        "action": result.action,
+        "workload_id": result.workload_id,
+        "error_message": result.error_message,
+    }
+    if json_out:
+        console.print_json(json.dumps(payload))
+    elif result.success:
+        console.print(f"[green]workload {result.action}[/] id={result.workload_id}")
+    else:
+        console.print(f"[red]workload deploy failed[/] {result.error_message or ''}")
+    _record_receipt(
+        target="workload",
+        action=result.action or "failed",
+        success=result.success,
+        config_dir=config_dir,
+        manifest_dir=path,
+        gap_report=gap_report,
+        waived=bool(gap_report.blocking),
+        error_message=result.error_message,
+        image_uri=image_uri,
+        replaces=replaces,
+    )
+    return 0 if result.success else 1
+
+
+memory_app = typer.Typer(help="Memory API space provisioning.")
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("ensure")
+def memory_ensure_cmd(
+    name: Annotated[str, typer.Argument(help="Memory space name")],
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Get-or-create a named Memory API space."""
+    from superrobot.pipeline.memory_provisioner import ensure_space
+
+    endpoint, token, state = _resolve_credentials(config_dir)
+    if not endpoint or not token:
+        console.print("[red]Not authenticated[/] — run [cyan]superrobot setup[/]")
+        raise typer.Exit(1)
+    if not state or not state.capabilities.memory:
+        console.print(
+            "[red]Memory API not entitled on this account[/] — "
+            "run [cyan]superrobot doctor[/] to re-probe capabilities"
+        )
+        raise typer.Exit(1)
+
+    result = asyncio.run(ensure_space(name, endpoint=endpoint, token=token))
+    payload = {
+        "success": result.success,
+        "action": result.action,
+        "space_id": result.space_id,
+        "error_message": result.error_message,
+    }
+    if json_out:
+        console.print_json(json.dumps(payload))
+    elif result.success:
+        console.print(f"[green]memory space {result.action}[/] id={result.space_id}")
+    else:
+        console.print(f"[red]memory ensure failed[/] {result.error_message or ''}")
+    raise typer.Exit(0 if result.success else 1)
+
+
+receipt_app = typer.Typer(help="Deploy receipts — attribution, history, diagnostics.")
+app.add_typer(receipt_app, name="receipt")
+
+
+def _print_receipt(receipt: Receipt) -> None:
+    status = "[green]success[/]" if receipt.success else "[red]failed[/]"
+    console.print(
+        f"[cyan]{receipt.id}[/] {receipt.target}/{receipt.action} {status} "
+        f"model={receipt.model} at={receipt.created_at}"
+    )
+    if receipt.replaces:
+        console.print(f"  replaces: {receipt.replaces}")
+    if receipt.waived_findings:
+        console.print(f"  waived: {len(receipt.waived_findings)} blocking finding(s)")
+    if receipt.error_message:
+        console.print(f"  error: {receipt.error_message}")
+
+
+@receipt_app.command("show")
+def receipt_show_cmd(
+    receipt_id: Annotated[str | None, typer.Argument(help="Receipt id (default: latest)")] = None,
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show one receipt — defaults to the most recent."""
+    from superrobot.pipeline.receipts import latest_receipt, load_receipt
+
+    receipt = load_receipt(receipt_id, config_dir) if receipt_id else latest_receipt(config_dir)
+    if receipt is None:
+        console.print("[yellow]No receipts found[/]")
+        raise typer.Exit(1)
+    if json_out:
+        console.print_json(receipt.model_dump_json())
+    else:
+        _print_receipt(receipt)
+    raise typer.Exit(0)
+
+
+@receipt_app.command("operations")
+def receipt_operations_cmd(
+    target: Annotated[str | None, typer.Option("--target")] = None,
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """List receipts, newest first."""
+    from superrobot.pipeline.receipts import list_receipts
+
+    receipts = list_receipts(config_dir, target=target)
+    if json_out:
+        console.print_json(json.dumps([r.model_dump() for r in receipts]))
+        raise typer.Exit(0)
+    if not receipts:
+        console.print("[yellow]No receipts found[/]")
+        raise typer.Exit(0)
+    table = Table(title="SuperRobot receipts")
+    table.add_column("id")
+    table.add_column("target")
+    table.add_column("action")
+    table.add_column("status")
+    table.add_column("created_at")
+    for r in receipts:
+        table.add_row(
+            r.id, r.target, r.action, "[green]ok[/]" if r.success else "[red]fail[/]", r.created_at
+        )
+    console.print(table)
+    raise typer.Exit(0)
+
+
+@receipt_app.command("diagnose")
+def receipt_diagnose_cmd(
+    receipt_id: Annotated[str, typer.Argument()],
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Pattern-matched fix suggestion for a failed receipt."""
+    from superrobot.pipeline.receipts import diagnose, load_receipt
+
+    receipt = load_receipt(receipt_id, config_dir)
+    if receipt is None:
+        console.print(f"[red]No such receipt[/] {receipt_id!r}")
+        raise typer.Exit(1)
+    fix = diagnose(receipt)
+    if json_out:
+        console.print_json(json.dumps({"receipt_id": receipt.id, "diagnosis": fix}))
+    else:
+        console.print(fix)
+    raise typer.Exit(0)
+
+
+@receipt_app.command("replace")
+def receipt_replace_cmd(
+    receipt_id: Annotated[str, typer.Argument()],
+    secret: Annotated[
+        list[str] | None,
+        typer.Option("--secret", help="KEY=credential:<id> (workload target, repeatable)"),
+    ] = None,
+    waive: Annotated[
+        bool, typer.Option("--waive", help="Proceed despite blocking Gap Analysis findings")
+    ] = False,
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Re-run the deploy captured by a receipt; the new receipt references it."""
+    from superrobot.pipeline.receipts import load_receipt
+
+    receipt = load_receipt(receipt_id, config_dir)
+    if receipt is None:
+        console.print(f"[red]No such receipt[/] {receipt_id!r}")
+        raise typer.Exit(1)
+    if not receipt.manifest_dir:
+        console.print("[red]Receipt has no manifest_dir recorded — cannot replay[/]")
+        raise typer.Exit(1)
+    path = Path(receipt.manifest_dir)
+
+    if receipt.target == "agent-app":
+        code = asyncio.run(
+            _deploy_agent_app(
+                path,
+                has_ui=receipt.has_ui,
+                waive=waive,
+                config_dir=config_dir,
+                json_out=json_out,
+                replaces=receipt.id,
+            )
+        )
+    else:
+        if not receipt.image_uri:
+            console.print(
+                "[red]Receipt has no image_uri recorded — cannot replay workload deploy[/]"
+            )
+            raise typer.Exit(1)
+        code = asyncio.run(
+            _deploy_workload(
+                path,
+                image_uri=receipt.image_uri,
+                secrets=secret,
+                waive=waive,
+                config_dir=config_dir,
+                json_out=json_out,
+                replaces=receipt.id,
+            )
+        )
+    raise typer.Exit(code)
 
 
 if __name__ == "__main__":

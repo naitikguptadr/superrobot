@@ -40,6 +40,42 @@ def test_scan_llamaindex_agent() -> None:
     assert result.detected_framework == "llamaindex"
 
 
+def test_scan_autogen_agent() -> None:
+    result = scan(FIXTURES / "autogen_agent")
+    assert result.detected_framework == "autogen"
+    assert result.confidence >= 0.7
+
+
+def test_scan_semantic_kernel_agent() -> None:
+    result = scan(FIXTURES / "semantic_kernel_agent")
+    assert result.detected_framework == "semantic_kernel"
+    assert result.confidence >= 0.7
+
+
+def test_scan_haystack_agent() -> None:
+    result = scan(FIXTURES / "haystack_agent")
+    assert result.detected_framework == "haystack"
+    assert result.confidence >= 0.7
+
+
+def test_scan_smolagents_agent() -> None:
+    result = scan(FIXTURES / "smolagents_agent")
+    assert result.detected_framework == "smolagents"
+    assert result.confidence >= 0.7
+
+
+def test_scan_langgraph_research_agent_complex() -> None:
+    result = scan(FIXTURES / "langgraph_research_agent")
+    assert result.detected_framework == "langgraph"
+    assert result.has_state_graph is True
+    assert result.primary_entry is not None
+    assert result.primary_entry.function == "run_agent"
+    assert "web_search" in result.tools
+    assert len(result.graph_nodes) >= 5
+    assert any(n["id"] == "planner" for n in result.graph_nodes)
+    assert result.python_file_count == 3
+
+
 def test_build_graph_langchain_fixture_is_clean() -> None:
     """Regression: graph used to include every AST call (getenv, ainvoke, str…)."""
     from superrobot.pipeline.scanner import build_graph

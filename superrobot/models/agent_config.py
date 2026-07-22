@@ -49,7 +49,7 @@ class AgentConfig(BaseModel):
         agent_name: str = "my-agent",
     ) -> "AgentConfig":
         """Merge scan and analysis into a generation-ready config."""
-        entry = scan.entry_points[0] if scan.entry_points else None
+        entry = scan.primary_entry
         env_vars = sorted(set(scan.env_vars))
         return cls(
             agent_name=agent_name,

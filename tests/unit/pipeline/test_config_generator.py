@@ -129,3 +129,24 @@ def test_bundle_includes_gateway_shim_when_migrated(tmp_path: Path) -> None:
     assert "agent/agent/dr_llm.py" in files
     assert "genai/llmgw" in files["agent/agent/dr_llm.py"]
     assert "dr_async_openai(" in files["agent/agent/main.py"]
+
+
+def test_render_files_includes_workload_service_and_manifest(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    config = AgentConfig(
+        agent_name="research-agent",
+        dr_framework=DrFramework.LANGGRAPH,
+        entry_file="main.py",
+        entry_function="run_agent",
+        entry_params=["query"],
+        repo_path=str(repo),
+    )
+
+    files = render_files(config)
+
+    assert "workload/Dockerfile" in files
+    assert "workload/workload.yaml" in files
+    assert "agent/agent/workload_service.py" in files
+    assert "/healthz" in files["agent/agent/workload_service.py"]
+    assert "run_agent" in files["agent/agent/workload_service.py"]
+    assert "replicaCount: 2" in files["workload/workload.yaml"]

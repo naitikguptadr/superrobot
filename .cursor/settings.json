@@ -1,7 +1,0 @@
-{
-  "plugins": {
-    "datarobot-agent-skills": {
-      "enabled": true
-    }
-  }
-}

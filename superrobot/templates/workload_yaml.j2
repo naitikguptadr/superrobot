@@ -1,0 +1,30 @@
+name: {{ agent_name }}
+importance: moderate
+artifact:
+  name: {{ agent_name }}-artifact
+  spec:
+    type: service
+    containerGroups:
+      - name: default
+        containers:
+          - name: main
+            imageUri: REPLACE_WITH_IMAGE_URI
+            port: 8000
+            primary: true
+            readinessProbe:
+              path: /readyz
+              port: 8000
+              initialDelaySeconds: 5
+            livenessProbe:
+              path: /healthz
+              port: 8000
+              initialDelaySeconds: 15
+runtime:
+  containerGroups:
+    - name: default
+      replicaCount: 2
+      containers:
+        - name: main
+          resourceAllocation:
+            cpu: 1
+            memory: 1GB
