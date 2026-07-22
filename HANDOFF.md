@@ -56,14 +56,39 @@ Branch is **local-only** (not pushed). Push before relying on remote fetch / som
 - Skill: `skills/superrobot-agent-app-deploy/`
 - Pre-deploy warnings (BUZZOK-30076 / logs deleted)
 
+### Spec 05 — Workload deploy
+- No `superrobot/deployment/`, `superrobot/workload/`, or `archive/pre-pi-rebuild` tag
+  existed anywhere in the archive repo on this machine — built fresh from
+  `docs/specs/05-workload-deploy.md` acceptance criteria and the Spec 04 pattern,
+  not ported. `workload_yaml.j2` / `workload_Dockerfile.j2` / `workload_service_py.j2`
+  templates already existed from Spec 03 and were reused as-is.
+- `superrobot/dr/workload_client.py` — async Workload API client (find/create/replace),
+  same injectable-transport shape as `setup/gateway.py`.
+- `superrobot/pipeline/workload_deployer.py` — loads `workload/workload.yaml`, injects
+  `--image-uri`, preflights (blocks replace below 2 replicas, blocks non-`credential:`
+  secret values) before any network call, then create-or-replace via `WorkloadClient`.
+- CLI: `deploy <dir> --target workload --image-uri <uri> [--secret KEY=credential:<id>] [--json]`.
+  Gated on persisted `SetupState.capabilities.workload` (from `doctor`/`setup`) — exits 1
+  with a clear message if the account isn't entitled.
+- Skill: `skills/superrobot-workload-deploy/`
+- Tests: `tests/unit/dr/test_workload_client.py`, `tests/unit/pipeline/test_workload_deployer.py`,
+  3 new CLI cases in `tests/unit/test_cli.py`. 92/92 unit tests green, ruff + mypy clean.
+
 ### Verification last green
 ```bash
-cd /Users/naitik.gupta/workspace/superrobot-v2
+cd /Users/naitikgupta/Projects/superrobot   # NOT superrobot-v2 — see path note below
 uv sync --all-extras
 uv run ruff check . && uv run ruff format --check . && uv run mypy superrobot
-uv run pytest tests/unit -q   # 73 passed
-cd shell && npm run build && npm run typecheck
+uv run pytest tests/unit -q   # 92 passed
+cd shell && npm run build && npm run typecheck   # unchanged by Spec 05, not re-run
 ```
+
+### Path note (2026-07-22)
+`/Users/naitik.gupta/workspace/superrobot-v2` does not exist on this machine (home is
+`naitikgupta`, no dot). The actual clone is `/Users/naitikgupta/Projects/superrobot`,
+which had `origin/rebuild/pi-datarobot` as a remote branch — checked it out locally to
+continue. `~/.cursor/plans/pi-hybrid-rebuild_3840b8d4.plan.md` is also not on this
+machine; this file plus `docs/specs/*.md` are the working source of truth here instead.
 
 Smoke:
 ```bash
@@ -75,28 +100,21 @@ uv run superrobot transform tests/fixtures/langchain_agent --json --skip-eval -o
 
 ## In progress / dirty tree
 
-- **Untracked:** `docs/specs/05-workload-deploy.md` (Spec 05 checklist written; **no workload code committed yet**).
-- Auto-review **blocked** a bulk `cp` of `workload/` + `deployment/` from the archive into v2. Next agent should either:
-  1. Get user approval for intentional archive port, or
-  2. Re-implement/port file-by-file via Read→Write (as done for workload Jinja templates).
-
-Archive sources to port for Spec 05:
-- `superrobot/deployment/*.py`
-- `superrobot/workload/*.py`
-- Tests: `tests/unit/test_workload_*.py`, `test_deployment_contracts.py`
-- Then wire CLI `deploy --target workload --image-uri …` + skill `superrobot-workload-deploy`
+None — Spec 05 committed clean, working tree matches HEAD.
 
 ---
 
 ## Remaining plan order
 
-1. **Spec 05** — Workload deploy / preflight / 2-replica replace guard  
+1. ~~**Spec 05** — Workload deploy / preflight / 2-replica replace guard~~ done
 2. **Spec 06** — Memory API behind capability flag  
 3. **Spec 07** — Gap Analysis skill + `validate` gates  
 4. **Spec 08** — Receipts + attribution + `receipt show|operations|diagnose|replace`  
 5. Deepen Spec 02 shell (graph canvas, status theater, visual QA) if demo needs it  
 6. Swarm/Gap handoff + demo + verification matrix  
-7. Cutover PR: full-tree replace of `main`; keep `archive/pre-pi-rebuild`
+7. Cutover PR: full-tree replace of `main`; keep an archive reference point (no
+   `archive/pre-pi-rebuild` tag exists in this repo — create one before cutover, or
+   confirm the equivalent already exists wherever `main` actually lives)
 
 ---
 
@@ -113,14 +131,17 @@ Archive sources to port for Spec 05:
 ## Suggested first message for next agent
 
 ```text
-Continue the SuperRobot Pi hybrid rebuild in /Users/naitik.gupta/workspace/superrobot-v2
-on branch rebuild/pi-datarobot. Read HANDOFF.md and ~/.cursor/plans/pi-hybrid-rebuild_3840b8d4.plan.md.
+Continue the SuperRobot Pi hybrid rebuild in /Users/naitikgupta/Projects/superrobot
+on branch rebuild/pi-datarobot. Read HANDOFF.md (no external plan file exists on this
+machine — HANDOFF.md + docs/specs/*.md are the source of truth).
 
-Specs 01–04 are committed (3df5d81). Next: Spec 05 Workload — intentionally port
-deployment/ + workload/ + tests from archive /Users/naitik.gupta/workspace/superrobot
-(tag archive/pre-pi-rebuild / branch feat/brownfield-pipeline-and-tui), wire
-`superrobot deploy --target workload`, commit when unit tests green.
+Specs 01–05 are committed. Next: Spec 06 Memory API behind a capability flag —
+follow the Spec 05 pattern (dr/ client with injectable transport, pipeline/ orchestrator,
+CLI subcommand gated on SetupState.capabilities, skill doc, unit tests). There is no
+Memory-related code in this repo yet to port from anywhere; build it fresh against
+docs/specs (write docs/specs/06-memory-api.md first if it doesn't exist) and the
+platform's Memory API shape referenced in CLAUDE.md.
 
 Do not touch the Textual TUI. Do not rewrite the engine in TypeScript.
-Spec-by-spec commits only. Archive is reference/port source, not the product tree.
+Spec-by-spec commits only.
 ```

@@ -27,6 +27,80 @@ def test_doctor_json_not_ready(tmp_path: Path) -> None:
     assert "ready" in result.stdout
 
 
+def test_deploy_workload_requires_image_uri(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app, ["deploy", str(tmp_path), "--target", "workload", "--config-dir", str(tmp_path)]
+    )
+    assert result.exit_code == 2
+    assert "--image-uri is required" in result.stdout
+
+
+def test_deploy_workload_blocked_without_entitlement(tmp_path: Path) -> None:
+    write_token_env(
+        endpoint="https://app.datarobot.com/api/v2",
+        token="tok",
+        model="azure/gpt-test",
+        root=tmp_path,
+    )
+    save_state(
+        SetupState(
+            endpoint="https://app.datarobot.com",
+            auth_method=AuthMethod.API_TOKEN,
+            capabilities=CapabilityMatrix(llm_gateway=True, workload=False),
+        ),
+        tmp_path,
+    )
+    result = runner.invoke(
+        app,
+        [
+            "deploy",
+            str(tmp_path),
+            "--target",
+            "workload",
+            "--image-uri",
+            "registry.example.com/agent:1",
+            "--config-dir",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "not entitled" in result.stdout
+
+
+def test_deploy_workload_rejects_malformed_secret_flag(tmp_path: Path) -> None:
+    write_token_env(
+        endpoint="https://app.datarobot.com/api/v2",
+        token="tok",
+        model="azure/gpt-test",
+        root=tmp_path,
+    )
+    save_state(
+        SetupState(
+            endpoint="https://app.datarobot.com",
+            auth_method=AuthMethod.API_TOKEN,
+            capabilities=CapabilityMatrix(llm_gateway=True, workload=True),
+        ),
+        tmp_path,
+    )
+    result = runner.invoke(
+        app,
+        [
+            "deploy",
+            str(tmp_path),
+            "--target",
+            "workload",
+            "--image-uri",
+            "registry.example.com/agent:1",
+            "--secret",
+            "NO_EQUALS_SIGN",
+            "--config-dir",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "Invalid --secret" in result.stdout
+
+
 def test_status_ready_with_config(tmp_path: Path) -> None:
     write_token_env(
         endpoint="https://app.datarobot.com/api/v2",

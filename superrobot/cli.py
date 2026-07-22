@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -236,32 +237,52 @@ def deploy_cmd(
     path: Annotated[Path, typer.Argument(help="Generated package directory")],
     target: Annotated[
         str,
-        typer.Option("--target", help="Deploy target (agent-app only in Spec 04)"),
+        typer.Option("--target", help="Deploy target: agent-app or workload"),
     ] = "agent-app",
     has_ui: Annotated[bool, typer.Option("--has-ui")] = False,
+    image_uri: Annotated[
+        str | None, typer.Option("--image-uri", help="Built container image (workload target)")
+    ] = None,
+    secret: Annotated[
+        list[str] | None,
+        typer.Option("--secret", help="KEY=credential:<id> (workload target, repeatable)"),
+    ] = None,
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
     json_out: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    """Deploy generated packaging to DataRobot Agent App via `dr`."""
-    from superrobot.pipeline.deployer import DEPLOY_WARNINGS, deploy
-
-    if target != "agent-app":
+    """Deploy generated packaging to DataRobot Agent App or the Workload API."""
+    if target not in {"agent-app", "workload"}:
         console.print(
-            f"[red]Unsupported target[/] {target!r} — Spec 04 supports [cyan]agent-app[/] only"
+            f"[red]Unsupported target[/] {target!r} — use [cyan]agent-app[/] or [cyan]workload[/]"
         )
         raise typer.Exit(2)
     if not path.is_dir():
         console.print(f"[red]Not a directory[/] {path}")
         raise typer.Exit(2)
 
+    if target == "agent-app":
+        raise typer.Exit(asyncio.run(_deploy_agent_app(path, has_ui=has_ui, json_out=json_out)))
+    raise typer.Exit(
+        asyncio.run(
+            _deploy_workload(
+                path, image_uri=image_uri, secrets=secret, config_dir=config_dir, json_out=json_out
+            )
+        )
+    )
+
+
+async def _deploy_agent_app(path: Path, *, has_ui: bool, json_out: bool) -> int:
+    from superrobot.pipeline.deployer import DEPLOY_WARNINGS, deploy
+
     for warning in DEPLOY_WARNINGS:
         if not has_ui and "Frontend" in warning:
             continue
         console.print(f"[yellow]![/] {warning}")
 
-    result = asyncio.run(deploy(cwd=str(path), has_ui=has_ui))
+    result = await deploy(cwd=str(path), has_ui=has_ui)
     payload = {
         "success": result.success,
-        "target": target,
+        "target": "agent-app",
         "warnings": result.warnings,
         "error_message": result.error_message,
     }
@@ -271,7 +292,71 @@ def deploy_cmd(
         console.print("[green]deploy succeeded[/]")
     else:
         console.print(f"[red]deploy failed[/] {result.error_message or ''}")
-    raise typer.Exit(0 if result.success else 1)
+    return 0 if result.success else 1
+
+
+async def _deploy_workload(
+    path: Path,
+    *,
+    image_uri: str | None,
+    secrets: list[str] | None,
+    config_dir: Path | None,
+    json_out: bool,
+) -> int:
+    from superrobot.pipeline.workload_deployer import deploy_workload
+    from superrobot.setup.config import load_env_file, load_state
+
+    if not image_uri:
+        console.print("[red]--image-uri is required for --target workload[/]")
+        return 2
+
+    secret_map: dict[str, str] = {}
+    for item in secrets or []:
+        if "=" not in item:
+            console.print(f"[red]Invalid --secret[/] {item!r} — expected KEY=VALUE")
+            return 2
+        key, value = item.split("=", maxsplit=1)
+        secret_map[key] = value
+
+    env = load_env_file(config_dir)
+    state = load_state(config_dir)
+    endpoint = (
+        env.get("DATAROBOT_ENDPOINT")
+        or (state.endpoint if state else "")
+        or os.environ.get("DATAROBOT_ENDPOINT", "")
+    )
+    token = env.get("DATAROBOT_API_TOKEN") or os.environ.get("DATAROBOT_API_TOKEN", "")
+    if not endpoint or not token:
+        console.print("[red]Not authenticated[/] — run [cyan]superrobot setup[/]")
+        return 1
+    if not state or not state.capabilities.workload:
+        console.print(
+            "[red]Workload API not entitled on this account[/] — "
+            "run [cyan]superrobot doctor[/] to re-probe capabilities"
+        )
+        return 1
+
+    result = await deploy_workload(
+        manifest_dir=str(path),
+        image_uri=image_uri,
+        endpoint=endpoint,
+        token=token,
+        secrets=secret_map,
+    )
+    payload = {
+        "success": result.success,
+        "target": "workload",
+        "action": result.action,
+        "workload_id": result.workload_id,
+        "error_message": result.error_message,
+    }
+    if json_out:
+        console.print_json(json.dumps(payload))
+    elif result.success:
+        console.print(f"[green]workload {result.action}[/] id={result.workload_id}")
+    else:
+        console.print(f"[red]workload deploy failed[/] {result.error_message or ''}")
+    return 0 if result.success else 1
 
 
 if __name__ == "__main__":
