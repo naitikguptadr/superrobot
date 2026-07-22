@@ -101,6 +101,32 @@ def test_deploy_workload_rejects_malformed_secret_flag(tmp_path: Path) -> None:
     assert "Invalid --secret" in result.stdout
 
 
+def test_memory_ensure_blocked_without_auth(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["memory", "ensure", "demo-space", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "Not authenticated" in result.stdout
+
+
+def test_memory_ensure_blocked_without_entitlement(tmp_path: Path) -> None:
+    write_token_env(
+        endpoint="https://app.datarobot.com/api/v2",
+        token="tok",
+        model="azure/gpt-test",
+        root=tmp_path,
+    )
+    save_state(
+        SetupState(
+            endpoint="https://app.datarobot.com",
+            auth_method=AuthMethod.API_TOKEN,
+            capabilities=CapabilityMatrix(llm_gateway=True, memory=False),
+        ),
+        tmp_path,
+    )
+    result = runner.invoke(app, ["memory", "ensure", "demo-space", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "not entitled" in result.stdout
+
+
 def test_status_ready_with_config(tmp_path: Path) -> None:
     write_token_env(
         endpoint="https://app.datarobot.com/api/v2",

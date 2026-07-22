@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
@@ -15,6 +15,9 @@ from rich.table import Table
 from superrobot import __version__
 from superrobot.setup.doctor import run_doctor
 from superrobot.setup.runner import run_setup
+
+if TYPE_CHECKING:
+    from superrobot.setup.models import SetupState
 
 console = Console()
 app = typer.Typer(
@@ -295,6 +298,21 @@ async def _deploy_agent_app(path: Path, *, has_ui: bool, json_out: bool) -> int:
     return 0 if result.success else 1
 
 
+def _resolve_credentials(config_dir: Path | None) -> tuple[str, str, SetupState | None]:
+    """Endpoint, token, and persisted SetupState — same resolution order as doctor."""
+    from superrobot.setup.config import load_env_file, load_state
+
+    env = load_env_file(config_dir)
+    state = load_state(config_dir)
+    endpoint = (
+        env.get("DATAROBOT_ENDPOINT")
+        or (state.endpoint if state else "")
+        or os.environ.get("DATAROBOT_ENDPOINT", "")
+    )
+    token = env.get("DATAROBOT_API_TOKEN") or os.environ.get("DATAROBOT_API_TOKEN", "")
+    return endpoint, token, state
+
+
 async def _deploy_workload(
     path: Path,
     *,
@@ -304,7 +322,6 @@ async def _deploy_workload(
     json_out: bool,
 ) -> int:
     from superrobot.pipeline.workload_deployer import deploy_workload
-    from superrobot.setup.config import load_env_file, load_state
 
     if not image_uri:
         console.print("[red]--image-uri is required for --target workload[/]")
@@ -318,14 +335,7 @@ async def _deploy_workload(
         key, value = item.split("=", maxsplit=1)
         secret_map[key] = value
 
-    env = load_env_file(config_dir)
-    state = load_state(config_dir)
-    endpoint = (
-        env.get("DATAROBOT_ENDPOINT")
-        or (state.endpoint if state else "")
-        or os.environ.get("DATAROBOT_ENDPOINT", "")
-    )
-    token = env.get("DATAROBOT_API_TOKEN") or os.environ.get("DATAROBOT_API_TOKEN", "")
+    endpoint, token, state = _resolve_credentials(config_dir)
     if not endpoint or not token:
         console.print("[red]Not authenticated[/] — run [cyan]superrobot setup[/]")
         return 1
@@ -357,6 +367,46 @@ async def _deploy_workload(
     else:
         console.print(f"[red]workload deploy failed[/] {result.error_message or ''}")
     return 0 if result.success else 1
+
+
+memory_app = typer.Typer(help="Memory API space provisioning.")
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("ensure")
+def memory_ensure_cmd(
+    name: Annotated[str, typer.Argument(help="Memory space name")],
+    config_dir: Annotated[Path | None, typer.Option("--config-dir")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Get-or-create a named Memory API space."""
+    from superrobot.pipeline.memory_provisioner import ensure_space
+
+    endpoint, token, state = _resolve_credentials(config_dir)
+    if not endpoint or not token:
+        console.print("[red]Not authenticated[/] — run [cyan]superrobot setup[/]")
+        raise typer.Exit(1)
+    if not state or not state.capabilities.memory:
+        console.print(
+            "[red]Memory API not entitled on this account[/] — "
+            "run [cyan]superrobot doctor[/] to re-probe capabilities"
+        )
+        raise typer.Exit(1)
+
+    result = asyncio.run(ensure_space(name, endpoint=endpoint, token=token))
+    payload = {
+        "success": result.success,
+        "action": result.action,
+        "space_id": result.space_id,
+        "error_message": result.error_message,
+    }
+    if json_out:
+        console.print_json(json.dumps(payload))
+    elif result.success:
+        console.print(f"[green]memory space {result.action}[/] id={result.space_id}")
+    else:
+        console.print(f"[red]memory ensure failed[/] {result.error_message or ''}")
+    raise typer.Exit(0 if result.success else 1)
 
 
 if __name__ == "__main__":
