@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/cli.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p extensions/tsconfig.json"
   },
   "dependencies": {
     "@mariozechner/pi-coding-agent": "^0.73.1",
