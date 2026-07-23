@@ -21,7 +21,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const extensionPath = join(__dirname, "..", "extensions", "superrobot.ts");
+const extensionPath = join(__dirname, "..", "extensions", "superrobot", "index.ts");
 const systemPromptPath = join(__dirname, "..", "prompts", "system.md");
 
 const DEFAULT_SYSTEM_PROMPT = "You are SuperRobot, a DataRobot brownfield deployment specialist.";
