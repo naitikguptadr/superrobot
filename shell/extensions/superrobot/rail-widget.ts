@@ -49,30 +49,57 @@ export function createRailController(ctx: ExtensionContext): RailController {
   let interval: ReturnType<typeof setInterval> | undefined;
   let startedAt = 0;
   let currentState: PipelineState | undefined;
+  let stopped = false;
+
+  function clearTimer(): void {
+    if (interval) {
+      clearInterval(interval);
+      interval = undefined;
+    }
+  }
 
   function draw(): void {
-    if (!currentState) return;
-    ctx.ui.setWidget(WIDGET_KEY, renderRailLines(currentState, Date.now() - startedAt));
+    if (stopped || !currentState) return;
+    try {
+      ctx.ui.setWidget(WIDGET_KEY, renderRailLines(currentState, Date.now() - startedAt));
+    } catch {
+      // ctx becomes unusable once the extension runtime it belongs to is torn
+      // down (session switch/fork/compact/shutdown/reload) -- accessing
+      // ctx.ui after that throws. A stale timer tick hitting that case isn't
+      // a bug to crash on; treat it the same as an explicit stop().
+      stopped = true;
+      clearTimer();
+    }
   }
 
   return {
     start(state: PipelineState) {
+      if (stopped) return;
       currentState = state;
       startedAt = Date.now();
       draw();
-      if (!interval) interval = setInterval(draw, 90);
+      // draw() may itself flip `stopped` (see its catch) if ctx turned out to
+      // be invalid on this very first draw -- don't arm a ticking interval
+      // in that case, or it would fire forever as a no-op and keep the
+      // process alive.
+      if (!interval && !stopped) interval = setInterval(draw, 90);
     },
     update(state: PipelineState) {
+      if (stopped) return;
       currentState = state;
       draw();
     },
     stop() {
-      if (interval) {
-        clearInterval(interval);
-        interval = undefined;
-      }
+      if (stopped) return;
+      stopped = true;
+      clearTimer();
       currentState = undefined;
-      ctx.ui.setWidget(WIDGET_KEY, undefined);
+      try {
+        ctx.ui.setWidget(WIDGET_KEY, undefined);
+      } catch {
+        // Same rationale as draw(): ctx may already be invalid by the time
+        // stop() runs (e.g. called from a session_shutdown handler).
+      }
     },
   };
 }
