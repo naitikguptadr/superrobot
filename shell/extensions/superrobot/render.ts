@@ -9,8 +9,16 @@ const THEME_PATH = join(__dirname, "..", "..", "theme", "superrobot.theme.json")
 export type RailColorName = "teal" | "tealMuted" | "gold" | "green" | "red" | "slate";
 
 function loadThemeVars(): Record<string, string> {
-  const parsed = JSON.parse(readFileSync(THEME_PATH, "utf8")) as { vars: Record<string, string> };
-  return parsed.vars;
+  // A missing or malformed theme file must not crash module load -- this file
+  // is imported transitively from index.ts, which every Pi session loads via
+  // `-e` at startup. railColor()'s existing "name not found" fallback already
+  // handles an empty vars map gracefully, so failing soft here is safe.
+  try {
+    const parsed = JSON.parse(readFileSync(THEME_PATH, "utf8")) as { vars: Record<string, string> };
+    return parsed.vars ?? {};
+  } catch {
+    return {};
+  }
 }
 
 const THEME_VARS = loadThemeVars();

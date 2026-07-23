@@ -15,6 +15,13 @@ test("railColor falls back to plain text for an unknown color name", () => {
   assert.equal(result, "hello");
 });
 
+test("railColor produces the exact RGB channels for teal's real theme hex (#3DDBD9)", () => {
+  const result = railColor("teal", "x");
+  // #3DDBD9 -> 61;219;217 -- pins the hex-to-RGB slicing against a known value
+  // so a swapped-channel or off-by-one slicing bug would fail this test.
+  assert.equal(result, "\x1b[38;2;61;219;217mx\x1b[0m");
+});
+
 test("spinnerFrame cycles through frames as elapsed time increases", () => {
   const frame0 = spinnerFrame(0);
   const frame1 = spinnerFrame(90);
