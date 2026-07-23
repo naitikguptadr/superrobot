@@ -73,3 +73,14 @@ test("createRailController: a throwing ctx.ui.setWidget (simulating an invalidat
   assert.doesNotThrow(() => controller.update(freshPipeline()));
   assert.doesNotThrow(() => controller.stop());
 });
+
+test("createRailController: stop() called first (before any draw ever ran) swallows a throwing ctx too", () => {
+  const controller = createRailController(
+    fakeCtx(() => {
+      throw new Error("ctx invalidated");
+    }),
+  );
+  // Exercises stop()'s own try/catch directly -- nothing has set `stopped`
+  // yet, so this hits stop()'s catch branch specifically, not start()'s.
+  assert.doesNotThrow(() => controller.stop());
+});
