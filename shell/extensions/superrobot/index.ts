@@ -15,7 +15,9 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const THEME_DIR = join(__dirname, "..", "theme");
+// index.ts now lives at extensions/superrobot/ (moved there in the directory
+// restructure) -- two levels up reaches shell/, then theme/.
+const THEME_DIR = join(__dirname, "..", "..", "theme");
 const PROVIDER_NAME = "datarobot-gateway";
 
 interface Capabilities {
