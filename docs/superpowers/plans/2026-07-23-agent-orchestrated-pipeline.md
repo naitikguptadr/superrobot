@@ -42,6 +42,22 @@ machine's Node version (no ts-node/tsx needed):
 node --version   # expect v22+ (verified working on v24.16.0)
 ```
 
+**Amendment (found while executing Task 2):** plain `node --test` only resolves
+relative imports that match a file on disk exactly. `moduleResolution: NodeNext`
+wants relative imports written with a `.js` extension (matching a future compiled
+`.js` file), but no compiled file exists here — extensions run straight from
+source via Pi's `jiti` loader, and tests run straight from source too. So every
+relative import in this plan's code (both implementation files and test files)
+uses an explicit **`.ts`** extension instead, e.g. `from "./cli-bridge.ts"`, not
+`from "./cli-bridge.js"`. This requires one extra compiler option,
+`allowImportingTsExtensions: true`, added to `shell/extensions/tsconfig.json`
+(which already has `noEmit: true`, a prerequisite for that option). Verified
+independently: with that option set, `tsc --noEmit` accepts `.ts`-extension
+relative imports cleanly, and plain `node --test some.test.ts` (zero flags, zero
+loaders, zero new dependencies) resolves them too. **Do not add `tsx` or any
+other test-loader dependency to `shell/package.json` for this** — it isn't
+needed once imports use `.ts` extensions.
+
 ---
 
 ### Task 1: Restructure the extension into a directory
@@ -155,7 +171,7 @@ those two cases.
 // shell/extensions/superrobot/cli-bridge.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createCliBridge, type ExecFn } from "./cli-bridge.js";
+import { createCliBridge, type ExecFn } from "./cli-bridge.ts";
 
 function fakeExec(
   impl: (args: string[]) => { stdout: string; stderr: string; code: number },
@@ -419,7 +435,7 @@ git commit -m "feat(shell): add typed CLI bridge for the superrobot binary"
 // shell/extensions/superrobot/pipeline-state.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { freshPipeline, withStageActive, withStageDone, withStageFailed } from "./pipeline-state.js";
+import { freshPipeline, withStageActive, withStageDone, withStageFailed } from "./pipeline-state.ts";
 
 test("freshPipeline starts all five stages pending", () => {
   const state = freshPipeline();
@@ -543,7 +559,7 @@ review. Width is computed from `visibleWidth()` (unicode- and ANSI-aware, from
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import { boxLines } from "./box.js";
+import { boxLines } from "./box.ts";
 
 test("all lines in the box have equal visible width", () => {
   const lines = boxLines(["short", "a much longer row of text", "mid"]);
@@ -636,7 +652,7 @@ passed into those two render slots) isn't available where the rail widget draws.
 // shell/extensions/superrobot/render.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { railColor, spinnerFrame } from "./render.js";
+import { railColor, spinnerFrame } from "./render.ts";
 
 test("railColor wraps text in a truecolor ANSI escape and resets after", () => {
   const result = railColor("teal", "hello");
@@ -751,8 +767,8 @@ here).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import { freshPipeline, withStageActive, withStageDone } from "./pipeline-state.js";
-import { renderRailLines } from "./rail-widget.js";
+import { freshPipeline, withStageActive, withStageDone } from "./pipeline-state.ts";
+import { renderRailLines } from "./rail-widget.ts";
 
 test("renders one row per stage plus a label and box borders", () => {
   const state = freshPipeline();
@@ -799,9 +815,9 @@ Expected: FAIL — module not found.
 ```typescript
 // shell/extensions/superrobot/rail-widget.ts
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { boxLines } from "./box.js";
-import type { PipelineState, StageId } from "./pipeline-state.js";
-import { railColor, spinnerFrame } from "./render.js";
+import { boxLines } from "./box.ts";
+import type { PipelineState, StageId } from "./pipeline-state.ts";
+import { railColor, spinnerFrame } from "./render.ts";
 
 const STAGE_LABELS: Record<StageId, string> = {
   scan: "Scan",
@@ -921,15 +937,15 @@ by the live walkthrough in Task 10. Type-correctness is enforced by
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
-import { createCliBridge, type CliResult } from "./cli-bridge.js";
+import { createCliBridge, type CliResult } from "./cli-bridge.ts";
 import {
   freshPipeline,
   withStageActive,
   withStageDone,
   withStageFailed,
   type PipelineState,
-} from "./pipeline-state.js";
-import { createRailController, type RailController } from "./rail-widget.js";
+} from "./pipeline-state.ts";
+import { createRailController, type RailController } from "./rail-widget.ts";
 
 interface ScanResult {
   detected_framework: string;
@@ -1204,7 +1220,7 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
 In `shell/extensions/superrobot/index.ts`, add near the top:
 
 ```ts
-import { registerSuperRobotTools } from "./tools.js";
+import { registerSuperRobotTools } from "./tools.ts";
 ```
 
 And inside the default export function, alongside the existing
