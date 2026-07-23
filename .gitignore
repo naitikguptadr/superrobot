@@ -16,3 +16,4 @@ shell/package-lock.json
 *.html
 graphify-out/
 .codegraph/
+.superpowers/
