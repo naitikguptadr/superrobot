@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { registerSuperRobotTools } from "./tools.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // index.ts now lives at extensions/superrobot/ (moved there in the directory
@@ -55,6 +56,8 @@ function chipLine(caps: Capabilities | null): string {
 export default function (pi: ExtensionAPI) {
   const gatewayBaseUrl = process.env.SUPERROBOT_GATEWAY_BASE_URL || "";
   const model = process.env.SUPERROBOT_MODEL || "azure/gpt-5-5-2026-04-23";
+
+  registerSuperRobotTools(pi);
 
   if (gatewayBaseUrl) {
     pi.registerProvider(PROVIDER_NAME, {
