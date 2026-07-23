@@ -3,7 +3,7 @@
  *
  * Branding and Gateway wiring happen two ways:
  * - Here: endpoint/token/model resolution, spawning `pi` with `-e` (our extension,
- *   see ../extensions/superrobot.ts) and `--system-prompt` — both real, documented
+ *   see ../extensions/superrobot/index.ts) and `--system-prompt` — both real, documented
  *   pi CLI mechanisms (checked against node_modules/@mariozechner/pi-coding-agent's
  *   own docs, not guessed).
  * - In the extension: provider registration, theme selection, capability chips.
