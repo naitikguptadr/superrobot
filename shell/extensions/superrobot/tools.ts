@@ -48,6 +48,13 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "superrobot_scan",
     label: "SuperRobot Scan",
+    // All five pipeline-stage tools share a single `pipeline`/`rail` closure
+    // per session. Pi runs sibling tool calls from the same turn concurrently
+    // by default; forcing these to run one at a time prevents two in-flight
+    // calls from interleaving writes to that shared state (e.g. a second
+    // superrobot_scan's freshPipeline() wiping out a still-running call's
+    // progress).
+    executionMode: "sequential",
     description:
       "Statically scan a Python agent repo (local path) for framework, entry points, env vars, and risk flags. Always the first step when importing a brownfield agent.",
     promptSnippet: "Scan a brownfield agent repo before transforming it",
@@ -80,6 +87,7 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "superrobot_transform",
     label: "SuperRobot Transform",
+    executionMode: "sequential",
     description:
       "Run Scan -> Analyze -> Generate for a brownfield agent repo, writing a DR-compliant package to outputDir.",
     promptSnippet: "Generate a DataRobot-compliant package from a scanned repo",
@@ -116,6 +124,7 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "superrobot_validate",
     label: "SuperRobot Validate",
+    executionMode: "sequential",
     description:
       "Run Gap Analysis against a generated package. Reports blocking and warning findings. A non-zero exit with findings is a normal result, not a tool failure.",
     promptSnippet: "Run Gap Analysis on a generated package before deploying",
@@ -160,6 +169,7 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "superrobot_deploy",
     label: "SuperRobot Deploy",
+    executionMode: "sequential",
     description:
       "Deploy a generated package to Agent App or Workload API. Always confirms with the user before running, and surfaces the known BUZZOK-30076 build-time and logs-deleted-on-failure warnings.",
     promptSnippet: "Deploy a validated package to Agent App or Workload",
@@ -215,6 +225,7 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "superrobot_receipts",
     label: "SuperRobot Receipts",
+    executionMode: "sequential",
     description: "Read deploy receipt history: show a receipt, list operations, diagnose a failure, or replace a prior deploy.",
     promptSnippet: "Inspect or act on deploy receipt history",
     promptGuidelines: [
@@ -247,6 +258,10 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
           throw new Error(`unknown receipts action: ${String(params.action)}`);
       }
       if (!result.ok) {
+        if (params.action === "show" || params.action === "replace") {
+          pipeline = withStageFailed(pipeline, "receipt", result.message);
+          rc.update(pipeline);
+        }
         throw new Error(`superrobot receipt ${params.action} failed: ${result.message}`);
       }
       if (params.action === "show" || params.action === "replace") {
