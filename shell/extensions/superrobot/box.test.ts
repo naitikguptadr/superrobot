@@ -29,3 +29,21 @@ test("minWidth pads narrower content up to the requested width", () => {
   const lines = boxLines(["hi"], 20);
   assert.ok(visibleWidth(lines[1]) >= 20);
 });
+
+test("a row containing a newline is flattened to a single line, not split across rows", () => {
+  const lines = boxLines(["one\ntwo", "short"]);
+  // top + 2 rows + bottom -- a newline must not produce an extra unbordered line
+  assert.equal(lines.length, 4);
+  for (const line of lines.slice(1, -1)) {
+    assert.ok(line.startsWith("│") && line.endsWith("│"), `row lost its border: ${JSON.stringify(line)}`);
+  }
+  const widths = new Set(lines.map((l) => visibleWidth(l)));
+  assert.equal(widths.size, 1, "newline-flattened row must still align with the rest of the box");
+});
+
+test("an empty rows array still produces a valid top/bottom-only box", () => {
+  const lines = boxLines([]);
+  assert.equal(lines.length, 2);
+  assert.ok(lines[0].startsWith("┌") && lines[0].endsWith("┐"));
+  assert.ok(lines[1].startsWith("└") && lines[1].endsWith("┘"));
+});
