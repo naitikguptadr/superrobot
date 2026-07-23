@@ -93,8 +93,10 @@ export function createCliBridge(exec: ExecFn) {
       return runJson<unknown>(exec, ["receipt", "diagnose", id], { cwd });
     },
 
-    receiptReplace(id: string, cwd?: string) {
-      return runJson<unknown>(exec, ["receipt", "replace", id], { cwd });
+    receiptReplace(id: string, opts: { waive?: boolean } = {}, cwd?: string) {
+      const args = ["receipt", "replace", id];
+      if (opts.waive) args.push("--waive");
+      return runJson<unknown>(exec, args, { cwd });
     },
 
     memoryEnsure(name: string, cwd?: string) {

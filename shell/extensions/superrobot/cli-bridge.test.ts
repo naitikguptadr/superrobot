@@ -98,3 +98,14 @@ test("receipts: show/operations/diagnose/replace build distinct arg shapes", asy
     ["receipt", "replace", "abc123", "--json"],
   ]);
 });
+
+test("receiptReplace: builds --waive flag when requested", async () => {
+  let capturedArgs: string[] = [];
+  const exec = fakeExec((args) => {
+    capturedArgs = args;
+    return { stdout: JSON.stringify({}), stderr: "", code: 0 };
+  });
+  const cli = createCliBridge(exec);
+  await cli.receiptReplace("abc123", { waive: true });
+  assert.deepEqual(capturedArgs, ["receipt", "replace", "abc123", "--waive", "--json"]);
+});
