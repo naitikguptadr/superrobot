@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import networkx as nx
+import networkx as nx  # type: ignore[import-untyped]
 
 from superrobot.pipeline.graph.builder import RepoGraph
 from superrobot.pipeline.scanner import ENTRY_POINT_NAMES, FRAMEWORK_IMPORTS

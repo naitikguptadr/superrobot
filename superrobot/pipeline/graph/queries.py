@@ -5,7 +5,7 @@ each doing an independent ad hoc pass.
 
 from __future__ import annotations
 
-import networkx as nx
+import networkx as nx  # type: ignore[import-untyped]
 
 from superrobot.pipeline.graph.builder import RepoGraph
 
@@ -14,7 +14,7 @@ def reachable_from(repo_graph: RepoGraph, node_id: str) -> set[str]:
     """Return all nodes reachable from node_id (excluding node_id itself)."""
     if node_id not in repo_graph.graph:
         return set()
-    return nx.descendants(repo_graph.graph, node_id)
+    return set(nx.descendants(repo_graph.graph, node_id))
 
 
 def imports_of(repo_graph: RepoGraph, module_node_id: str) -> list[str]:

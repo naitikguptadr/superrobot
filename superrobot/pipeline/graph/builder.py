@@ -16,8 +16,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-import jedi
-import networkx as nx
+import jedi  # type: ignore[import-untyped]
+import networkx as nx  # type: ignore[import-untyped]
 
 _EXCLUDED_DIR_NAMES = {"__pycache__", "venv", ".venv", "node_modules", ".git"}
 
@@ -57,7 +57,7 @@ class RepoGraph:
         path.write_text(json.dumps(data, default=str))
 
     @classmethod
-    def load(cls, path: Path, repo_root: Path) -> "RepoGraph":
+    def load(cls, path: Path, repo_root: Path) -> RepoGraph:
         """Load a previously-saved graph from path."""
         data = json.loads(path.read_text())
         graph = nx.node_link_graph(data, edges="edges")
@@ -73,7 +73,7 @@ def _assign_parents(tree: ast.AST) -> None:
     """
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
-            child.parent = parent
+            child.parent = parent  # type: ignore[attr-defined]
 
 
 def _qualified_name(node: ast.AST) -> list[str]:
@@ -154,12 +154,20 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
                 if not isinstance(call, ast.Call):
                     continue
                 target = call.func
+                line: int | None
+                col: int | None
                 if isinstance(target, ast.Name):
                     line, col = target.lineno, target.col_offset
                 elif isinstance(target, ast.Attribute):
                     line = target.end_lineno
-                    col = target.end_col_offset - len(target.attr)
+                    col = (
+                        target.end_col_offset - len(target.attr)
+                        if target.end_col_offset is not None
+                        else None
+                    )
                 else:
+                    continue
+                if line is None or col is None:
                     continue
 
                 try:
