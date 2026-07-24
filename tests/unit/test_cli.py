@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from superrobot.cli import _gap_gate, app
@@ -28,12 +29,32 @@ def test_doctor_json_not_ready(tmp_path: Path) -> None:
     assert "ready" in result.stdout
 
 
-def test_deploy_workload_requires_image_uri(tmp_path: Path) -> None:
+def test_deploy_workload_requires_image_uri_or_artifact_id(tmp_path: Path) -> None:
     result = runner.invoke(
         app, ["deploy", str(tmp_path), "--target", "workload", "--config-dir", str(tmp_path)]
     )
     assert result.exit_code == 2
-    assert "--image-uri is required" in result.stdout
+    assert "Exactly one of --image-uri or --artifact-id" in result.stdout
+
+
+def test_deploy_workload_rejects_both_image_uri_and_artifact_id(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "deploy",
+            str(tmp_path),
+            "--target",
+            "workload",
+            "--image-uri",
+            "registry.example.com/agent:1",
+            "--artifact-id",
+            "artifact-abc123",
+            "--config-dir",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "Exactly one of --image-uri or --artifact-id" in result.stdout
 
 
 def test_deploy_workload_blocked_without_entitlement(tmp_path: Path) -> None:
@@ -138,6 +159,38 @@ def test_deploy_agent_app_blocked_by_gap_analysis(tmp_path: Path) -> None:
     assert "Deploy refused" in result.stdout
 
 
+def test_deploy_agent_app_json_output_is_pure_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: DEPLOY_WARNINGS used to print to stdout unconditionally,
+    corrupting `--json` output with plain-text lines before the JSON payload."""
+    from superrobot.dr.cli_wrapper import DrCommandResult
+
+    class _FakeWrapper:
+        async def task_run_deploy(self, cwd: str | None = None) -> DrCommandResult:
+            return DrCommandResult(0, "deployed", "")
+
+    monkeypatch.setattr("superrobot.pipeline.deployer.DrCliWrapper", _FakeWrapper)
+
+    result = runner.invoke(
+        app,
+        [
+            "deploy",
+            str(tmp_path),
+            "--target",
+            "agent-app",
+            "--waive",
+            "--config-dir",
+            str(tmp_path),
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)  # raises if anything but JSON is on stdout
+    assert payload["success"] is True
+    assert payload["target"] == "agent-app"
+
+
 def test_deploy_workload_blocked_by_gap_analysis_after_entitlement_checks(
     tmp_path: Path,
 ) -> None:
@@ -198,6 +251,42 @@ def test_deploy_blocked_by_gap_analysis_writes_receipt(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert '"target": "agent-app"' in result.stdout
     assert '"action": "blocked"' in result.stdout
+
+
+def test_deploy_workload_blocked_receipt_records_artifact_id(tmp_path: Path) -> None:
+    write_token_env(
+        endpoint="https://app.datarobot.com/api/v2",
+        token="tok",
+        model="azure/gpt-test",
+        root=tmp_path,
+    )
+    save_state(
+        SetupState(
+            endpoint="https://app.datarobot.com",
+            auth_method=AuthMethod.API_TOKEN,
+            capabilities=CapabilityMatrix(llm_gateway=True, workload=True),
+        ),
+        tmp_path,
+    )
+    # empty dir -- no generated package files, so Gap Analysis blocks before any API call
+    runner.invoke(
+        app,
+        [
+            "deploy",
+            str(tmp_path),
+            "--target",
+            "workload",
+            "--artifact-id",
+            "artifact-abc123",
+            "--config-dir",
+            str(tmp_path),
+        ],
+    )
+    result = runner.invoke(app, ["receipt", "show", "--config-dir", str(tmp_path), "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["artifact_id"] == "artifact-abc123"
+    assert payload["action"] == "blocked"
 
 
 def test_receipt_show_defaults_to_latest(tmp_path: Path) -> None:

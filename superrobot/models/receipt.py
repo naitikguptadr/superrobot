@@ -25,4 +25,5 @@ class Receipt(BaseModel):
     replaces: str | None = None
     manifest_dir: str | None = None
     image_uri: str | None = None
+    artifact_id: str | None = None
     has_ui: bool = False

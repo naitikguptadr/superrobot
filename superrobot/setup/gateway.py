@@ -34,13 +34,17 @@ async def verify_gateway(
         "Accept": "application/json",
     }
     runner = transport or _http_transport
-    status, payload = await runner("GET", f"{base}/v1/models", headers, None)
+    # DataRobot's LLM Gateway is not OpenAI-hosted -- it has no /v1 prefix.
+    # The documented, token-authenticated paths are /catalog/ (model listing)
+    # and /chat/completions/ (confirmed against a real staging environment;
+    # /v1/models and /v1/chat/completions both 404 there).
+    status, payload = await runner("GET", f"{base}/catalog/", headers, None)
     if status == 404:
         # Some gateways only expose chat; fall back to a minimal models-compatible probe
         selected = model or os.environ.get("SUPERROBOT_MODEL", "azure/gpt-5-5-2026-04-23")
         status, payload = await runner(
             "POST",
-            f"{base}/v1/chat/completions",
+            f"{base}/chat/completions/",
             headers,
             {
                 "model": selected,

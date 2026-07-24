@@ -96,8 +96,58 @@ def test_verify_gateway_success_and_redacts_token() -> None:
     asyncio.run(run())
 
 
+def test_verify_gateway_hits_the_real_documented_paths() -> None:
+    """DataRobot's LLM Gateway has no /v1 prefix -- /catalog/ and
+    /chat/completions/ are the real, token-authenticated paths (confirmed
+    against a real environment: /v1/models and /v1/chat/completions both
+    404 there). Regression test for that path bug."""
+
+    calls: list[tuple[str, str]] = []
+
+    async def transport(
+        method: str, url: str, headers: dict[str, str], payload: object | None
+    ) -> tuple[int, object]:
+        calls.append((method, url))
+        return 200, {"data": []}
+
+    async def run() -> None:
+        assert await verify_gateway(
+            "https://app.datarobot.com", "secret-token", transport=transport
+        )
+
+    asyncio.run(run())
+    assert calls == [("GET", "https://app.datarobot.com/api/v2/genai/llmgw/catalog/")]
+
+
+def test_verify_gateway_falls_back_to_chat_completions_path() -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def transport(
+        method: str, url: str, headers: dict[str, str], payload: object | None
+    ) -> tuple[int, object]:
+        calls.append((method, url))
+        if method == "GET":
+            return 404, {"detail": "Not Found"}
+        return 200, {"choices": []}
+
+    async def run() -> None:
+        assert await verify_gateway(
+            "https://app.datarobot.com", "secret-token", transport=transport
+        )
+
+    asyncio.run(run())
+    assert calls == [
+        ("GET", "https://app.datarobot.com/api/v2/genai/llmgw/catalog/"),
+        ("POST", "https://app.datarobot.com/api/v2/genai/llmgw/chat/completions/"),
+    ]
+
+
 def test_probe_capabilities_marks_workload_and_memory() -> None:
+    gateway_calls: list[str] = []
+
     async def get(url: str, headers: dict[str, str]) -> tuple[int, object]:
+        if "llmgw" in url:
+            gateway_calls.append(url)
         if "workloads" in url:
             return 200, {"data": []}
         if "agenticMemory" in url or "Memory" in url:
@@ -113,8 +163,12 @@ def test_probe_capabilities_marks_workload_and_memory() -> None:
         assert caps.workload is True
         assert caps.memory is True
         assert caps.code_to_workload is True
+        assert caps.llm_gateway is True
 
     asyncio.run(run())
+    # Regression check: the gateway capability probe must hit the real
+    # /catalog/ path, not the nonexistent /v1/models.
+    assert gateway_calls == ["https://app.datarobot.com/api/v2/genai/llmgw/catalog/"]
 
 
 def test_doctor_ready_when_endpoint_auth_gateway_ok(

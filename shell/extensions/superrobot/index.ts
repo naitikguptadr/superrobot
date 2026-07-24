@@ -13,9 +13,15 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { registerSuperRobotTools } from "./tools.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const THEME_DIR = join(__dirname, "..", "theme");
+// index.ts now lives at extensions/superrobot/ (moved there in the directory
+// restructure) -- two levels up reaches shell/, then theme/.
+const THEME_DIR = join(__dirname, "..", "..", "theme");
+// Three levels up from extensions/superrobot/ reaches the repo root, then
+// the vendored datarobot-agent-skills submodule's skills/ directory.
+const DATAROBOT_SKILLS_DIR = join(__dirname, "..", "..", "..", "vendor", "datarobot-agent-skills", "skills");
 const PROVIDER_NAME = "datarobot-gateway";
 
 interface Capabilities {
@@ -54,6 +60,8 @@ export default function (pi: ExtensionAPI) {
   const gatewayBaseUrl = process.env.SUPERROBOT_GATEWAY_BASE_URL || "";
   const model = process.env.SUPERROBOT_MODEL || "azure/gpt-5-5-2026-04-23";
 
+  registerSuperRobotTools(pi);
+
   if (gatewayBaseUrl) {
     pi.registerProvider(PROVIDER_NAME, {
       name: "DataRobot LLM Gateway",
@@ -76,6 +84,10 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("resources_discover", async () => ({
     themePaths: [THEME_DIR],
+    // Vendored as a git submodule (vendor/datarobot-agent-skills) -- may not
+    // be initialized on a fresh clone (`git submodule update --init`), so
+    // only contribute the path if it's actually present.
+    skillPaths: existsSync(DATAROBOT_SKILLS_DIR) ? [DATAROBOT_SKILLS_DIR] : [],
   }));
 
   pi.on("session_start", async (_event, ctx) => {

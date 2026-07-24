@@ -40,6 +40,31 @@ def load_manifest(manifest_dir: str | Path, image_uri: str) -> dict[str, object]
     return manifest
 
 
+def load_manifest_from_artifact(manifest_dir: str | Path, artifact_id: str) -> dict[str, object]:
+    """Read workload/workload.yaml but reference an existing artifact by id
+    instead of an inline artifact.spec + imageUri.
+
+    Needed for images built via Code-to-Workload (server-side build):
+    those images live in DataRobot's own internal registry and are only
+    schedulable when the workload references the artifact that was
+    actually built -- creating a fresh artifact from a copied imageUri is
+    rejected with "is not permitted on this cluster" (confirmed against a
+    real staging environment). The `name` and `runtime` blocks are
+    unchanged; only `artifact` is replaced with `artifactId`. Per the
+    DataRobot Workload API, `runtime.containerGroups[].name` and
+    `containers[].name` must match what the referenced artifact defines.
+    """
+    path = Path(manifest_dir) / "workload" / "workload.yaml"
+    if not path.is_file():
+        raise WorkloadPreflightError(f"No workload.yaml found at {path}")
+    manifest = yaml.safe_load(path.read_text())
+    if not isinstance(manifest, dict):
+        raise WorkloadPreflightError(f"Invalid workload.yaml at {path}")
+    manifest.pop("artifact", None)
+    manifest["artifactId"] = artifact_id
+    return manifest
+
+
 def _min_replica_count(manifest: dict[str, object]) -> int:
     runtime = manifest.get("runtime")
     if not isinstance(runtime, dict):
@@ -73,17 +98,36 @@ def preflight_secrets(secrets: dict[str, str] | None) -> None:
 async def deploy_workload(
     *,
     manifest_dir: str | Path,
-    image_uri: str,
     endpoint: str,
     token: str,
+    image_uri: str | None = None,
+    artifact_id: str | None = None,
     agent_name: str | None = None,
     secrets: dict[str, str] | None = None,
     client: WorkloadClient | None = None,
 ) -> WorkloadDeployResult:
-    """Create or rolling-replace a Workload API deployment."""
+    """Create or rolling-replace a Workload API deployment.
+
+    Exactly one of `image_uri` (bring-your-own-image: a fresh artifact is
+    created from workload.yaml's inline spec) or `artifact_id` (reference an
+    already-built artifact -- required for Code-to-Workload/server-side
+    builds) must be given.
+    """
+    if bool(image_uri) == bool(artifact_id):
+        return WorkloadDeployResult(
+            success=False,
+            action=None,
+            workload_id=None,
+            error_message="Exactly one of image_uri or artifact_id is required",
+        )
+
     try:
         preflight_secrets(secrets)
-        manifest = load_manifest(manifest_dir, image_uri)
+        manifest = (
+            load_manifest(manifest_dir, image_uri)
+            if image_uri
+            else load_manifest_from_artifact(manifest_dir, artifact_id)  # type: ignore[arg-type]
+        )
     except WorkloadPreflightError as exc:
         return WorkloadDeployResult(
             success=False, action=None, workload_id=None, error_message=str(exc)

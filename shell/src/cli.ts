@@ -3,7 +3,7 @@
  *
  * Branding and Gateway wiring happen two ways:
  * - Here: endpoint/token/model resolution, spawning `pi` with `-e` (our extension,
- *   see ../extensions/superrobot.ts) and `--system-prompt` — both real, documented
+ *   see ../extensions/superrobot/index.ts) and `--system-prompt` — both real, documented
  *   pi CLI mechanisms (checked against node_modules/@mariozechner/pi-coding-agent's
  *   own docs, not guessed).
  * - In the extension: provider registration, theme selection, capability chips.
@@ -21,7 +21,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const extensionPath = join(__dirname, "..", "extensions", "superrobot.ts");
+const extensionPath = join(__dirname, "..", "extensions", "superrobot", "index.ts");
 const systemPromptPath = join(__dirname, "..", "prompts", "system.md");
 
 const DEFAULT_SYSTEM_PROMPT = "You are SuperRobot, a DataRobot brownfield deployment specialist.";
@@ -51,7 +51,12 @@ function resolveGatewayConfig(base: Record<string, string>): GatewayConfig {
   const token = process.env.DATAROBOT_API_TOKEN || base.DATAROBOT_API_TOKEN || "";
   const model = process.env.SUPERROBOT_MODEL || base.SUPERROBOT_MODEL || "azure/gpt-5-5-2026-04-23";
   const apiRoot = endpoint.endsWith("/api/v2") ? endpoint : `${endpoint}/api/v2`;
-  const gatewayBaseUrl = endpoint ? `${apiRoot}/genai/llmgw/v1` : "";
+  // DataRobot's LLM Gateway has no /v1 prefix -- confirmed against a real
+  // staging environment: .../genai/llmgw/v1/chat/completions 404s, while
+  // .../genai/llmgw/chat/completions/ (what the OpenAI SDK's baseURL + its
+  // own /chat/completions suffix produces from this base) is the real,
+  // documented, token-authenticated path.
+  const gatewayBaseUrl = endpoint ? `${apiRoot}/genai/llmgw` : "";
   return { endpoint, token, model, gatewayBaseUrl };
 }
 

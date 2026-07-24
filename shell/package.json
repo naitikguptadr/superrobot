@@ -9,7 +9,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/cli.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p extensions/tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p extensions/tsconfig.json",
+    "test": "node --test extensions/superrobot/*.test.ts"
   },
   "dependencies": {
     "@mariozechner/pi-coding-agent": "^0.73.1",

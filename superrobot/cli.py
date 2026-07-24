@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -15,6 +16,7 @@ from rich.table import Table
 from superrobot import __version__
 from superrobot.setup.doctor import run_doctor
 from superrobot.setup.runner import run_setup
+from superrobot.shell_launcher import find_shell_entry
 
 if TYPE_CHECKING:
     from superrobot.models.gap_result import GapReport
@@ -22,12 +24,37 @@ if TYPE_CHECKING:
     from superrobot.setup.models import SetupState
 
 console = Console()
+console_err = Console(stderr=True)
 app = typer.Typer(
     name="superrobot",
     help="Bring any Python agent to DataRobot — migrate, validate, deploy, operate.",
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
+
+# Args that should still go through Typer's own parsing/dispatch rather than
+# being handed off to the interactive shell.
+_KNOWN_SUBCOMMANDS = {
+    "doctor",
+    "setup",
+    "status",
+    "scan",
+    "analyze",
+    "generate",
+    "transform",
+    "validate",
+    "deploy",
+    "memory",
+    "receipt",
+}
+_KNOWN_GLOBAL_FLAGS = {
+    "--help",
+    "-h",
+    "--version",
+    "-V",
+    "--install-completion",
+    "--show-completion",
+}
 
 
 def _version_callback(value: bool) -> None:
@@ -44,6 +71,63 @@ def main(
     ] = None,
 ) -> None:
     """SuperRobot — DataRobot-native brownfield control plane."""
+
+
+def should_launch_shell(argv: list[str]) -> bool:
+    """True when argv doesn't look like a real subcommand invocation, so
+    `superrobot` (bare, or with shell-only flags like --print) should launch
+    the interactive shell instead of falling through to Typer's own parsing
+    (which would otherwise error on an unrecognized command/option).
+
+    Tradeoff: this only inspects argv[0], so a free-text prompt that happens
+    to start with a subcommand word (e.g. "generate a poem about pandas")
+    dispatches to Typer, not the shell, and Typer will report a usage error
+    for that subcommand rather than treating it as a prompt. Accepted as a
+    known limitation rather than a heuristic that guesses at intent."""
+    if not argv:
+        return True
+    return argv[0] not in _KNOWN_SUBCOMMANDS and argv[0] not in _KNOWN_GLOBAL_FLAGS
+
+
+def launch_shell(argv: list[str]) -> None:
+    """Replace the current process with the built Pi shell, passing argv through.
+
+    Called from main_entry(), before Typer/Click ever runs -- typer.Exit is
+    only translated to a clean process exit inside Click's own dispatch, so
+    failures here must raise SystemExit directly instead.
+    """
+    shell_entry = find_shell_entry()
+    if shell_entry is None:
+        console.print(
+            "[red]Interactive shell not found[/] — build it first:\n"
+            "  [cyan]cd shell && npm install && npm run build[/]\n"
+            "or set [cyan]SUPERROBOT_SHELL_DIR[/] to a directory containing dist/cli.js.\n\n"
+            "Run [cyan]superrobot --help[/] to see available subcommands instead."
+        )
+        raise SystemExit(1)
+
+    node = shutil.which("node")
+    if node is None:
+        console.print("[red]node not found on PATH[/] — required to run the interactive shell.")
+        raise SystemExit(1)
+
+    try:
+        os.execvp(node, [node, str(shell_entry), *argv])
+    except OSError as exc:
+        console.print(f"[red]Failed to launch the interactive shell:[/] {exc}")
+        raise SystemExit(1) from exc
+
+
+def main_entry() -> None:
+    """Console-script entry point: launch the shell for bare/unrecognized
+    invocations, otherwise dispatch to Typer as usual."""
+    import sys
+
+    argv = sys.argv[1:]
+    if should_launch_shell(argv):
+        launch_shell(argv)
+        return
+    app()
 
 
 @app.command("doctor")
@@ -286,6 +370,19 @@ def deploy_cmd(
     image_uri: Annotated[
         str | None, typer.Option("--image-uri", help="Built container image (workload target)")
     ] = None,
+    artifact_id: Annotated[
+        str | None,
+        typer.Option(
+            "--artifact-id",
+            help=(
+                "Deploy from an already-built Workload API artifact instead of a fresh "
+                "image URI (required for Code-to-Workload/server-side builds -- those "
+                "images live in DataRobot's internal registry and aren't schedulable "
+                "under a freshly-created artifact). Workload target only; exactly one "
+                "of --image-uri/--artifact-id is required."
+            ),
+        ),
+    ] = None,
     secret: Annotated[
         list[str] | None,
         typer.Option("--secret", help="KEY=credential:<id> (workload target, repeatable)"),
@@ -319,6 +416,7 @@ def deploy_cmd(
             _deploy_workload(
                 path,
                 image_uri=image_uri,
+                artifact_id=artifact_id,
                 secrets=secret,
                 waive=waive,
                 config_dir=config_dir,
@@ -361,6 +459,7 @@ def _record_receipt(
     waived: bool = False,
     error_message: str | None = None,
     image_uri: str | None = None,
+    artifact_id: str | None = None,
     has_ui: bool = False,
     replaces: str | None = None,
 ) -> None:
@@ -392,6 +491,7 @@ def _record_receipt(
         replaces=replaces,
         manifest_dir=str(manifest_dir),
         image_uri=image_uri,
+        artifact_id=artifact_id,
         has_ui=has_ui,
     )
     save_receipt(receipt, config_dir)
@@ -405,6 +505,7 @@ def _gap_gate(
     target: str,
     config_dir: Path | None,
     image_uri: str | None = None,
+    artifact_id: str | None = None,
     has_ui: bool = False,
     replaces: str | None = None,
 ) -> GapReport | None:
@@ -436,6 +537,7 @@ def _gap_gate(
             gap_report=report,
             error_message="; ".join(f.message for f in report.blocking),
             image_uri=image_uri,
+            artifact_id=artifact_id,
             has_ui=has_ui,
             replaces=replaces,
         )
@@ -471,7 +573,11 @@ async def _deploy_agent_app(
     for warning in DEPLOY_WARNINGS:
         if not has_ui and "Frontend" in warning:
             continue
-        console.print(f"[yellow]![/] {warning}")
+        # Always stderr, never stdout -- printing to stdout unconditionally
+        # here corrupted `--json` output (the JSON payload printed further
+        # below shares stdout, and JSON.parse requires the whole stream to
+        # be valid JSON with nothing prepended).
+        console_err.print(f"[yellow]![/] {warning}")
 
     result = await deploy(cwd=str(path), has_ui=has_ui)
     payload = {
@@ -505,6 +611,7 @@ async def _deploy_workload(
     path: Path,
     *,
     image_uri: str | None,
+    artifact_id: str | None = None,
     secrets: list[str] | None,
     waive: bool,
     config_dir: Path | None,
@@ -513,8 +620,10 @@ async def _deploy_workload(
 ) -> int:
     from superrobot.pipeline.workload_deployer import deploy_workload
 
-    if not image_uri:
-        console.print("[red]--image-uri is required for --target workload[/]")
+    if bool(image_uri) == bool(artifact_id):
+        console.print(
+            "[red]Exactly one of --image-uri or --artifact-id is required for --target workload[/]"
+        )
         return 2
 
     secret_map: dict[str, str] = {}
@@ -543,6 +652,7 @@ async def _deploy_workload(
         target="workload",
         config_dir=config_dir,
         image_uri=image_uri,
+        artifact_id=artifact_id,
         replaces=replaces,
     )
     if gap_report is None:
@@ -551,6 +661,7 @@ async def _deploy_workload(
     result = await deploy_workload(
         manifest_dir=str(path),
         image_uri=image_uri,
+        artifact_id=artifact_id,
         endpoint=endpoint,
         token=token,
         secrets=secret_map,
@@ -578,6 +689,7 @@ async def _deploy_workload(
         waived=bool(gap_report.blocking),
         error_message=result.error_message,
         image_uri=image_uri,
+        artifact_id=artifact_id,
         replaces=replaces,
     )
     return 0 if result.success else 1
@@ -652,7 +764,10 @@ def receipt_show_cmd(
 
     receipt = load_receipt(receipt_id, config_dir) if receipt_id else latest_receipt(config_dir)
     if receipt is None:
-        console.print("[yellow]No receipts found[/]")
+        if json_out:
+            console.print_json(json.dumps({"error": "no receipts found"}))
+        else:
+            console.print("[yellow]No receipts found[/]")
         raise typer.Exit(1)
     if json_out:
         console.print_json(receipt.model_dump_json())
