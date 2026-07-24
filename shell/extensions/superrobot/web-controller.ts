@@ -16,6 +16,10 @@ const CONTENT_TYPES: Record<string, string> = {
   ".js": "text/javascript",
   ".css": "text/css",
   ".json": "application/json",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".svg": "image/svg+xml",
 };
 
 export interface WebController {

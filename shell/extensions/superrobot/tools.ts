@@ -46,6 +46,7 @@ export function registerSuperRobotTools(
   let pipeline: PipelineState = freshPipeline();
   let rail: RailController | undefined;
   let web: WebController | undefined;
+  let hasNotifiedWebUrl = false;
 
   function railFor(ctx: ExtensionContext): RailController {
     if (!rail) rail = createRailController(ctx);
@@ -69,10 +70,17 @@ export function registerSuperRobotTools(
     }
   }
 
-  async function safeWebStart(wc: WebController | undefined, state: PipelineState): Promise<void> {
+  async function safeWebStart(wc: WebController | undefined, state: PipelineState, ctx: ExtensionContext): Promise<void> {
     if (!wc) return;
     try {
-      await wc.start(state);
+      const { port } = await wc.start(state);
+      // Only announce the URL once per session: the port never changes once
+      // bound, so re-notifying on every subsequent pipeline tool call (scan,
+      // transform, validate, deploy, receipts) would just be noise.
+      if (!hasNotifiedWebUrl && port > 0) {
+        hasNotifiedWebUrl = true;
+        ctx.ui.notify(`SuperRobot companion UI: http://localhost:${port}`);
+      }
     } catch (err) {
       console.error("[superrobot] web companion failed to start:", err);
     }
@@ -112,7 +120,7 @@ export function registerSuperRobotTools(
       pipeline = freshPipeline();
       pipeline = withStageActive(pipeline, "scan", params.path);
       rc.start(pipeline);
-      await safeWebStart(wc, pipeline);
+      await safeWebStart(wc, pipeline, ctx);
 
       const result = await cli.scan(params.path);
       if (!result.ok) {

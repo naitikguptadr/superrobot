@@ -29,7 +29,7 @@ function fakePi(execImpl: (args: string[]) => ExecResult): {
   return { pi, tools };
 }
 
-function fakeCtx(): ExtensionContext {
+function fakeCtx(notifyCalls?: string[]): ExtensionContext {
   return {
     ui: {
       // Throwing here (rather than a no-op) mirrors rail-widget.test.ts's own
@@ -42,7 +42,9 @@ function fakeCtx(): ExtensionContext {
         throw new Error("no real widget host in tests");
       },
       confirm: async () => true,
-      notify: () => {},
+      notify: (message: string) => {
+        notifyCalls?.push(message);
+      },
     },
   } as unknown as ExtensionContext;
 }
@@ -89,6 +91,33 @@ test("a web companion factory that throws synchronously does not fail superrobot
   const result = await scan!("id1", { path: "tests/fixtures/langchain_agent" }, undefined, undefined, fakeCtx());
 
   assert.equal(result.content[0]?.text, "langchain detected, 1 env vars, conf 0.90");
+});
+
+test("the web companion URL is only notified once per session, even across multiple pipeline tool calls", async () => {
+  const { pi, tools } = fakePi((args) => {
+    if (args[0] === "transform") {
+      return { stdout: JSON.stringify({ files: ["a.py"] }), stderr: "", code: 0 };
+    }
+    return scanExecOk()(args);
+  });
+  const fakeWebController: WebController = {
+    start: async () => ({ port: 4321 }),
+    update: () => {},
+    stop: async () => {},
+  };
+  registerSuperRobotTools(pi, () => fakeWebController);
+
+  const scan = tools.get("superrobot_scan");
+  const transform = tools.get("superrobot_transform");
+  assert.ok(scan && transform, "both tools should be registered");
+
+  const notifyCalls: string[] = [];
+  await scan!("id1", { path: "tests/fixtures/langchain_agent" }, undefined, undefined, fakeCtx(notifyCalls));
+  await scan!("id2", { path: "tests/fixtures/langchain_agent" }, undefined, undefined, fakeCtx(notifyCalls));
+  await transform!("id3", { path: "tests/fixtures/langchain_agent", outputDir: "out" }, undefined, undefined, fakeCtx(notifyCalls));
+
+  assert.equal(notifyCalls.length, 1, "the companion URL should only be notified once");
+  assert.match(notifyCalls[0]!, /^SuperRobot companion UI: http:\/\/localhost:4321$/);
 });
 
 test("a web companion whose start()/update() reject or throw does not fail superrobot_scan", async () => {
