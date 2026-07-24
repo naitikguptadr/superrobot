@@ -81,24 +81,42 @@ Because this touches the core of three pipeline stages, it ships as a **parallel
 
 ### Context
 
-DataRobot publishes a real, actively-maintained React component library, `@datarobot/design-system` (npm), which is also what `af-component-react` (DataRobot's App Framework React scaffolding component) wires up via the `dr-ui` registry. This gives SuperRobot a concrete, real UI kit to build against rather than an abstract "make it look nice" goal.
+DataRobot publishes a real, actively-maintained React component library, `@datarobot/design-system` (npm, v30.13.0+, requires React >=18), which is also what `af-component-react` (DataRobot's App Framework React scaffolding component) wires up via the `dr-ui` registry. Verified directly from the published package (not guessed): it ships real `Stepper`, `Badge`, `Card`, and `GranularProgressBar` components with subpath imports (e.g. `import { Badge } from '@datarobot/design-system/badge'`), plus a single global stylesheet import (`@datarobot/design-system/styles/index.min.css`) — no Tailwind/CSS-in-JS build step required. `EmbeddedSteps` exists but is explicitly deprecated in favor of `Stepper`; use `Stepper` only. The package's own README requires an `i18next`/`react-i18next` init even for basic usage — this needs including in the companion app's bootstrap. The package is published from a private DataRobot org registry; installing it requires the same registry auth already configured for other DataRobot-internal npm packages on this machine (confirmed installable via `npm pack` during research — no separate credential setup identified as needed beyond what's already present).
+
+The existing pipeline-state reducer (built earlier this session, `shell/extensions/superrobot/pipeline-state.ts`) already defines the exact state shape to reuse verbatim:
+
+```typescript
+export type StageId = "scan" | "transform" | "validate" | "deploy" | "receipt";
+export type StageStatus = "pending" | "active" | "done" | "failed";
+
+export interface StageState {
+  id: StageId;
+  status: StageStatus;
+  detail: string;
+}
+
+export type PipelineState = StageState[];
+```
+
+The existing `RailController` (`shell/extensions/superrobot/rail-widget.ts`) exposes `start(state)`/`update(state)`/`stop()`, called directly from the 6 tool handlers in `shell/extensions/superrobot/tools.ts` via a closure-captured `pipeline` variable (no event emitter, no Redux — plain push calls after each state mutation). The companion's server-side controller should mirror this exact `start`/`update`/`stop` shape so `tools.ts` needs minimal changes to also notify it.
 
 ### Architecture
 
-- New `shell/companion/` package: a small React + Vite app built on `@datarobot/design-system`.
-- Renders the same 5-stage pipeline (scan/transform/validate/deploy/receipts) that the terminal rail-widget already tracks, using DataRobot's real stepper/status/badge components instead of ASCII boxes.
-- The shell (Node/Pi extension) spins up a small local HTTP+WebSocket server when a pipeline run starts, serving the companion app and pushing the same pipeline-state-reducer updates (already built earlier this session for the rail-widget) over a local WebSocket.
-- Opened via a local URL in the user's browser, following the same pattern as Pi's own existing visual-companion tooling — not a new interaction paradigm, a second renderer for state that already exists.
-- Strictly additive and opt-in: the terminal rail-widget remains the default, headless/CI-safe UI. The companion never becomes a requirement for any pipeline stage to function.
+- New `shell/companion/` package: a small React + Vite app built on `@datarobot/design-system`, mapping the 4 existing `StageStatus` values to `Badge`'s boolean status props (`pending` -> `plain`, `active` -> `info` + `isLoading`, `done` -> `success`, `failed` -> `error`) and rendering the 5 stages via `Stepper`.
+- A new `web-controller.ts` in `shell/extensions/superrobot/`, implementing the same `start(state)`/`update(state)`/`stop()` interface as `RailController`, backed by a plain Node `http.createServer` (serving the built Vite app's static files) plus a `ws`-based WebSocket pushing `PipelineState` JSON on every `update()` call. No HTTP framework dependency needed beyond Node's stdlib `http` and the `ws` package.
+- `tools.ts`'s existing `railFor(ctx)` pattern gets a sibling `webFor(ctx)` following the identical lazy-init-on-first-call shape; both controllers receive the same `start`/`update` calls (a tiny "notify all UIs" helper wrapping both, rather than duplicating call sites in each of the 6 tool handlers).
+- Opened via a local URL (`ctx.ui.notify()` announces it; Pi has no built-in "open local URL" helper today, confirmed via research — this is a new pattern for this codebase, not an existing one to reuse).
+- Strictly additive and opt-in: the terminal rail-widget remains the default, headless/CI-safe UI. The companion never becomes a requirement for any pipeline stage to function, and if the web server fails to bind (e.g. port in use), that must not fail the underlying pipeline tool call.
 
 ### Testing
 
-- React Testing Library component tests for the stepper/status rendering given synthetic pipeline states.
+- React Testing Library component tests for the Stepper/Badge rendering given synthetic `PipelineState` values (all 4 statuses, all 5 stages).
 - A smoke test asserting the local server boots, serves the app, and the WebSocket delivers a state update end-to-end.
+- A test proving a web-server bind failure (e.g. port already in use) does NOT propagate as a failure of the underlying `superrobot_scan`/etc. tool call.
 
 ### New dependencies
 
-`@datarobot/design-system`, `react`, `react-dom`, `vite` (Node/shell side only — no Python dependency).
+`@datarobot/design-system`, `react`, `react-dom`, `react-i18next`, `i18next`, `vite` (companion app, built separately); `ws` (shell side, for the WebSocket server). No Python dependency.
 
 ---
 

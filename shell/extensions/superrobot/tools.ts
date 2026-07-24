@@ -10,6 +10,7 @@ import {
   type PipelineState,
 } from "./pipeline-state.ts";
 import { createRailController, type RailController } from "./rail-widget.ts";
+import { createWebController, type WebController } from "./web-controller.ts";
 
 interface ScanResult {
   detected_framework: string;
@@ -34,15 +35,64 @@ interface GapReport {
   findings: GapFinding[];
 }
 
-export function registerSuperRobotTools(pi: ExtensionAPI): void {
+export function registerSuperRobotTools(
+  pi: ExtensionAPI,
+  // Injectable only for tests -- production callers (index.ts) rely on the
+  // default so this never changes registerSuperRobotTools(pi)'s call sites.
+  webControllerFactory: typeof createWebController = createWebController,
+): void {
   const cli = createCliBridge((args, opts) => pi.exec("superrobot", args, opts));
 
   let pipeline: PipelineState = freshPipeline();
   let rail: RailController | undefined;
+  let web: WebController | undefined;
+  let hasNotifiedWebUrl = false;
 
   function railFor(ctx: ExtensionContext): RailController {
     if (!rail) rail = createRailController(ctx);
     return rail;
+  }
+
+  // The companion web UI is strictly optional and additive: any failure here
+  // (constructing the controller, starting its server, or pushing an update)
+  // must never fail the actual superrobot_* tool call. webFor() itself isn't
+  // expected to throw (createWebController just builds an object -- it does
+  // no I/O), but we guard it anyway since a future change could make it
+  // fallible and we'd rather swallow that than break the pipeline tools.
+  function webFor(): WebController | undefined {
+    if (web) return web;
+    try {
+      web = webControllerFactory({ port: 0 });
+      return web;
+    } catch (err) {
+      console.error("[superrobot] failed to create web companion controller:", err);
+      return undefined;
+    }
+  }
+
+  async function safeWebStart(wc: WebController | undefined, state: PipelineState, ctx: ExtensionContext): Promise<void> {
+    if (!wc) return;
+    try {
+      const { port } = await wc.start(state);
+      // Only announce the URL once per session: the port never changes once
+      // bound, so re-notifying on every subsequent pipeline tool call (scan,
+      // transform, validate, deploy, receipts) would just be noise.
+      if (!hasNotifiedWebUrl && port > 0) {
+        hasNotifiedWebUrl = true;
+        ctx.ui.notify(`SuperRobot companion UI: http://localhost:${port}`);
+      }
+    } catch (err) {
+      console.error("[superrobot] web companion failed to start:", err);
+    }
+  }
+
+  function safeWebUpdate(wc: WebController | undefined, state: PipelineState): void {
+    if (!wc) return;
+    try {
+      wc.update(state);
+    } catch (err) {
+      console.error("[superrobot] web companion failed to update:", err);
+    }
   }
 
   pi.registerTool({
@@ -66,20 +116,24 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const rc = railFor(ctx);
+      const wc = webFor();
       pipeline = freshPipeline();
       pipeline = withStageActive(pipeline, "scan", params.path);
       rc.start(pipeline);
+      await safeWebStart(wc, pipeline, ctx);
 
       const result = await cli.scan(params.path);
       if (!result.ok) {
         pipeline = withStageFailed(pipeline, "scan", result.message);
         rc.update(pipeline);
+        safeWebUpdate(wc, pipeline);
         throw new Error(`superrobot scan failed: ${result.message}`);
       }
       const data = result.data as ScanResult;
       const detail = `${data.detected_framework} detected, ${(data.env_vars ?? []).length} env vars, conf ${data.confidence.toFixed(2)}`;
       pipeline = withStageDone(pipeline, "scan", detail);
       rc.update(pipeline);
+      safeWebUpdate(wc, pipeline);
       return { content: [{ type: "text", text: detail }], details: data };
     },
   });
@@ -101,8 +155,10 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const rc = railFor(ctx);
+      const wc = webFor();
       pipeline = withStageActive(pipeline, "transform", params.outputDir);
       rc.update(pipeline);
+      safeWebUpdate(wc, pipeline);
 
       const result = await cli.transform(params.path, {
         outputDir: params.outputDir,
@@ -111,12 +167,14 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
       if (!result.ok) {
         pipeline = withStageFailed(pipeline, "transform", result.message);
         rc.update(pipeline);
+        safeWebUpdate(wc, pipeline);
         throw new Error(`superrobot transform failed: ${result.message}`);
       }
       const data = result.data as { files?: string[] };
       const detail = `${(data.files ?? []).length} files generated`;
       pipeline = withStageDone(pipeline, "transform", detail);
       rc.update(pipeline);
+      safeWebUpdate(wc, pipeline);
       return { content: [{ type: "text", text: detail }], details: data };
     },
   });
@@ -138,8 +196,10 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const rc = railFor(ctx);
+      const wc = webFor();
       pipeline = withStageActive(pipeline, "validate", params.dir);
       rc.update(pipeline);
+      safeWebUpdate(wc, pipeline);
 
       const result = await cli.validate(params.dir, params.source);
       // validate exits non-zero when there are blocking findings -- that's a
@@ -154,6 +214,7 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
       } else {
         pipeline = withStageFailed(pipeline, "validate", result.message);
         rc.update(pipeline);
+        safeWebUpdate(wc, pipeline);
         throw new Error(`superrobot validate failed: ${result.message}`);
       }
       const findings = data?.findings ?? [];
@@ -162,6 +223,7 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
       const detail = blocking > 0 ? `${blocking} blocking, ${warnings} warning(s)` : `clean (${warnings} warning(s))`;
       pipeline = blocking > 0 ? withStageFailed(pipeline, "validate", detail) : withStageDone(pipeline, "validate", detail);
       rc.update(pipeline);
+      safeWebUpdate(wc, pipeline);
       return { content: [{ type: "text", text: detail }], details: data ?? {} };
     },
   });
@@ -196,8 +258,10 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
       }
 
       const rc = railFor(ctx);
+      const wc = webFor();
       pipeline = withStageActive(pipeline, "deploy", params.target);
       rc.update(pipeline);
+      safeWebUpdate(wc, pipeline);
 
       const result = await cli.deploy(params.dir, params.target, {
         imageUri: params.imageUri,
@@ -215,12 +279,14 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
       } else {
         pipeline = withStageFailed(pipeline, "deploy", result.message);
         rc.update(pipeline);
+        safeWebUpdate(wc, pipeline);
         throw new Error(`superrobot deploy failed: ${result.message}`);
       }
       const succeeded = data?.success ?? false;
       const detail = succeeded ? "deployed" : (data?.error_message ?? "blocked or failed");
       pipeline = succeeded ? withStageDone(pipeline, "deploy", detail) : withStageFailed(pipeline, "deploy", detail);
       rc.update(pipeline);
+      safeWebUpdate(wc, pipeline);
       return { content: [{ type: "text", text: detail }], details: data ?? {} };
     },
   });
@@ -241,6 +307,7 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const rc = railFor(ctx);
+      const wc = webFor();
       let result: CliResult<unknown>;
       switch (params.action) {
         case "show":
@@ -264,12 +331,14 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
         if (params.action === "show" || params.action === "replace") {
           pipeline = withStageFailed(pipeline, "receipt", result.message);
           rc.update(pipeline);
+          safeWebUpdate(wc, pipeline);
         }
         throw new Error(`superrobot receipt ${params.action} failed: ${result.message}`);
       }
       if (params.action === "show" || params.action === "replace") {
         pipeline = withStageDone(pipeline, "receipt", params.action);
         rc.update(pipeline);
+        safeWebUpdate(wc, pipeline);
       }
       return { content: [{ type: "text", text: JSON.stringify(result.data) }], details: result.data as object };
     },
