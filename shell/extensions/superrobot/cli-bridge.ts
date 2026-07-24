@@ -68,11 +68,12 @@ export function createCliBridge(exec: ExecFn) {
     deploy(
       path: string,
       target: "agent-app" | "workload",
-      opts: { imageUri?: string; waive?: boolean } = {},
+      opts: { imageUri?: string; artifactId?: string; waive?: boolean } = {},
       cwd?: string,
     ) {
       const args = ["deploy", path, "--target", target];
       if (opts.imageUri) args.push("--image-uri", opts.imageUri);
+      if (opts.artifactId) args.push("--artifact-id", opts.artifactId);
       if (opts.waive) args.push("--waive");
       return runJson<unknown>(exec, args, { cwd });
     },

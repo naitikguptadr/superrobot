@@ -78,6 +78,29 @@ test("deploy: builds target/waive/image-uri flags", async () => {
   ]);
 });
 
+test("deploy: builds --artifact-id flag as an alternative to --image-uri", async () => {
+  // Code-to-Workload (server-side build) images live in DataRobot's own
+  // internal registry and are only schedulable when the workload references
+  // the artifact that was actually built -- a fresh artifact from a copied
+  // imageUri is rejected. --artifact-id is the deploy path for that case.
+  let capturedArgs: string[] = [];
+  const exec = fakeExec((args) => {
+    capturedArgs = args;
+    return { stdout: JSON.stringify({ success: true }), stderr: "", code: 0 };
+  });
+  const cli = createCliBridge(exec);
+  await cli.deploy("/tmp/sr-out", "workload", { artifactId: "artifact-abc123" });
+  assert.deepEqual(capturedArgs, [
+    "deploy",
+    "/tmp/sr-out",
+    "--target",
+    "workload",
+    "--artifact-id",
+    "artifact-abc123",
+    "--json",
+  ]);
+});
+
 test("receipts: show/operations/diagnose/replace build distinct arg shapes", async () => {
   const seen: string[][] = [];
   const exec = fakeExec((args) => {

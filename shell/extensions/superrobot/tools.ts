@@ -176,11 +176,13 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
     promptGuidelines: [
       "Use superrobot_deploy only after superrobot_validate reports zero blocking findings.",
       "Never set waive on superrobot_deploy unless the user explicitly asked to waive or override a specific Gap Analysis finding.",
+      "For target=workload, use artifactId (not imageUri) when the user already has a Code-to-Workload (server-side build) artifact -- those images live in DataRobot's own internal registry and are rejected as 'not permitted on this cluster' if you instead build a fresh artifact from imageUri. Ask the user which one they have if unclear.",
     ],
     parameters: Type.Object({
       dir: Type.String({ description: "Generated package directory" }),
       target: StringEnum(["agent-app", "workload"] as const),
-      imageUri: Type.Optional(Type.String({ description: "Built container image URI, required for target=workload" })),
+      imageUri: Type.Optional(Type.String({ description: "Built container image URI (bring-your-own-image), for target=workload" })),
+      artifactId: Type.Optional(Type.String({ description: "Existing Workload API artifact id (e.g. from a Code-to-Workload build), for target=workload. Use instead of imageUri, never both." })),
       waive: Type.Optional(Type.Boolean({ description: "Only true if the user explicitly asked to waive a blocking Gap Analysis finding" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -199,6 +201,7 @@ export function registerSuperRobotTools(pi: ExtensionAPI): void {
 
       const result = await cli.deploy(params.dir, params.target, {
         imageUri: params.imageUri,
+        artifactId: params.artifactId,
         waive: params.waive,
       });
       // Same narrowing as superrobot_validate: only not_found/parse_error are
