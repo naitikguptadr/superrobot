@@ -60,9 +60,14 @@ def detect_framework(repo_graph: RepoGraph, entry_point: str | None) -> Framewor
                 reachable.add(module_node)
                 # A framework import only "counts" as reachable if it's
                 # actually imported by a module on the entry point's real
-                # call path, so pull in that module's `imports` targets too.
+                # call path, so pull in that module's `imports` targets too
+                # -- except edges tagged type_checking_only=True, which
+                # never execute (an `if TYPE_CHECKING:`-guarded import) and
+                # so must never make a module look reachable/in-use.
                 for _, imported, imports_attrs in graph.out_edges(module_node, data=True):
-                    if imports_attrs.get("kind") == "imports":
+                    if imports_attrs.get("kind") == "imports" and not imports_attrs.get(
+                        "type_checking_only", False
+                    ):
                         reachable.add(imported)
 
     reachable_frameworks: dict[str, str] = {}
@@ -73,6 +78,17 @@ def detect_framework(repo_graph: RepoGraph, entry_point: str | None) -> Framewor
         # Check both local modules and external imports (which may have no 'kind')
         kind = attrs.get("kind")
         if kind not in ("module", None):
+            continue
+        if _is_type_checking_only_import(graph, node):
+            # This module's only presence in the graph is an
+            # `if TYPE_CHECKING:`-guarded import, which never executes at
+            # runtime. That's a different situation from a genuinely
+            # unreachable (but real, executed) import: there's no code to
+            # warn about as a possible abandoned migration, since the
+            # import was never meant to run in the first place. Skip it
+            # from detection entirely rather than counting it as reachable
+            # OR folding it into unreachable_warnings with language that
+            # would misrepresent it as dead runtime code.
             continue
         for prefix, framework in FRAMEWORK_IMPORTS.items():
             if node != prefix and not node.startswith(prefix + "."):
@@ -113,6 +129,23 @@ def detect_framework(repo_graph: RepoGraph, entry_point: str | None) -> Framewor
         )
 
     return FrameworkDetection(framework="unknown", confidence=0.2)
+
+
+def _is_type_checking_only_import(graph: nx.DiGraph, node: str) -> bool:
+    """True if every "imports" edge targeting node is tagged
+    type_checking_only=True -- i.e. this module's only presence in the
+    graph comes from an `if TYPE_CHECKING:`-guarded import, which never
+    executes at runtime. A node with no "imports" in-edges at all (e.g. a
+    real module defined in the repo with no importer) is NOT considered
+    type-checking-only here; this only applies when there's at least one
+    "imports" edge and none of them are real.
+    """
+    import_edge_attrs = [
+        attrs for _, _, attrs in graph.in_edges(node, data=True) if attrs.get("kind") == "imports"
+    ]
+    return bool(import_edge_attrs) and all(
+        attrs.get("type_checking_only", False) for attrs in import_edge_attrs
+    )
 
 
 def _has_entry_point_signal(graph: nx.DiGraph, reachable: set[str]) -> bool:
