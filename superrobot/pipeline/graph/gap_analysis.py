@@ -1,8 +1,9 @@
-"""Graph-native gap analysis checks. Reuses GapFinding from the existing
-superrobot.pipeline.gap_analysis module so results compose with today's
-GapReport unchanged -- this adds one new check, it does not replace the
-existing file-scan-based rules (flat-imports, endpoint-usage,
-pyproject-removal, runtime-param), which stay as they are for now.
+"""Graph-native gap analysis checks. Reuses GapFinding from the canonical
+superrobot.models.gap_result module so results compose with today's
+GapReport/gap_analysis.py flow unchanged -- this adds one new check, it
+does not replace the existing file-scan-based rules (flat-imports,
+endpoint-usage, pyproject-removal, runtime-param), which stay as they are
+for now.
 """
 
 from __future__ import annotations
