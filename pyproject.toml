@@ -41,6 +41,9 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# vendor/ is a vendored third-party git submodule (datarobot-agent-skills) --
+# not ours to lint/format.
+extend-exclude = ["vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

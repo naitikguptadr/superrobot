@@ -15,6 +15,7 @@ This tree is the **from-scratch rebuild** on `rebuild/pi-datarobot` (orphan bran
 ## Quick start (Spec 01)
 
 ```bash
+git submodule update --init --recursive   # pulls in vendor/datarobot-agent-skills
 uv sync --all-extras
 uv run superrobot setup --endpoint https://app.datarobot.com --token "$DATAROBOT_API_TOKEN" --yes
 uv run superrobot doctor
@@ -23,8 +24,12 @@ uv run superrobot doctor
 Interactive shell (Spec 02 bootstrap):
 
 ```bash
-cd shell && npm install && npm run build && npm start
+cd shell && npm install && npm run build
 ```
+
+Then just run `superrobot` (no subcommand) from anywhere in the repo — it launches
+the interactive shell directly. Existing subcommands (`scan`, `transform`, `deploy`,
+etc.) are unaffected.
 
 ## Specs
 
