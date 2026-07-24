@@ -459,6 +459,7 @@ def _record_receipt(
     waived: bool = False,
     error_message: str | None = None,
     image_uri: str | None = None,
+    artifact_id: str | None = None,
     has_ui: bool = False,
     replaces: str | None = None,
 ) -> None:
@@ -490,6 +491,7 @@ def _record_receipt(
         replaces=replaces,
         manifest_dir=str(manifest_dir),
         image_uri=image_uri,
+        artifact_id=artifact_id,
         has_ui=has_ui,
     )
     save_receipt(receipt, config_dir)
@@ -503,6 +505,7 @@ def _gap_gate(
     target: str,
     config_dir: Path | None,
     image_uri: str | None = None,
+    artifact_id: str | None = None,
     has_ui: bool = False,
     replaces: str | None = None,
 ) -> GapReport | None:
@@ -534,6 +537,7 @@ def _gap_gate(
             gap_report=report,
             error_message="; ".join(f.message for f in report.blocking),
             image_uri=image_uri,
+            artifact_id=artifact_id,
             has_ui=has_ui,
             replaces=replaces,
         )
@@ -648,6 +652,7 @@ async def _deploy_workload(
         target="workload",
         config_dir=config_dir,
         image_uri=image_uri,
+        artifact_id=artifact_id,
         replaces=replaces,
     )
     if gap_report is None:
@@ -684,6 +689,7 @@ async def _deploy_workload(
         waived=bool(gap_report.blocking),
         error_message=result.error_message,
         image_uri=image_uri,
+        artifact_id=artifact_id,
         replaces=replaces,
     )
     return 0 if result.success else 1

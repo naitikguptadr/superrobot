@@ -253,6 +253,42 @@ def test_deploy_blocked_by_gap_analysis_writes_receipt(tmp_path: Path) -> None:
     assert '"action": "blocked"' in result.stdout
 
 
+def test_deploy_workload_blocked_receipt_records_artifact_id(tmp_path: Path) -> None:
+    write_token_env(
+        endpoint="https://app.datarobot.com/api/v2",
+        token="tok",
+        model="azure/gpt-test",
+        root=tmp_path,
+    )
+    save_state(
+        SetupState(
+            endpoint="https://app.datarobot.com",
+            auth_method=AuthMethod.API_TOKEN,
+            capabilities=CapabilityMatrix(llm_gateway=True, workload=True),
+        ),
+        tmp_path,
+    )
+    # empty dir -- no generated package files, so Gap Analysis blocks before any API call
+    runner.invoke(
+        app,
+        [
+            "deploy",
+            str(tmp_path),
+            "--target",
+            "workload",
+            "--artifact-id",
+            "artifact-abc123",
+            "--config-dir",
+            str(tmp_path),
+        ],
+    )
+    result = runner.invoke(app, ["receipt", "show", "--config-dir", str(tmp_path), "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["artifact_id"] == "artifact-abc123"
+    assert payload["action"] == "blocked"
+
+
 def test_receipt_show_defaults_to_latest(tmp_path: Path) -> None:
     runner.invoke(
         app, ["deploy", str(tmp_path), "--target", "agent-app", "--config-dir", str(tmp_path)]
