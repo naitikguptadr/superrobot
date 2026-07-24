@@ -49,7 +49,9 @@ async def probe_capabilities(
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     fetcher = get or _get
 
-    gateway_ok = await _ok(fetcher, f"{base}/genai/llmgw/v1/models", headers)
+    # /v1/models doesn't exist on DataRobot's LLM Gateway (no /v1 prefix --
+    # confirmed against a real environment); /catalog/ is the real path.
+    gateway_ok = await _ok(fetcher, f"{base}/genai/llmgw/catalog/", headers)
 
     workload_status, _ = await fetcher(f"{base}/workloads/?limit=1", headers)
     workload_ok = workload_status in {200, 201, 403}

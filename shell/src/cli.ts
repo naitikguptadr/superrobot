@@ -51,7 +51,12 @@ function resolveGatewayConfig(base: Record<string, string>): GatewayConfig {
   const token = process.env.DATAROBOT_API_TOKEN || base.DATAROBOT_API_TOKEN || "";
   const model = process.env.SUPERROBOT_MODEL || base.SUPERROBOT_MODEL || "azure/gpt-5-5-2026-04-23";
   const apiRoot = endpoint.endsWith("/api/v2") ? endpoint : `${endpoint}/api/v2`;
-  const gatewayBaseUrl = endpoint ? `${apiRoot}/genai/llmgw/v1` : "";
+  // DataRobot's LLM Gateway has no /v1 prefix -- confirmed against a real
+  // staging environment: .../genai/llmgw/v1/chat/completions 404s, while
+  // .../genai/llmgw/chat/completions/ (what the OpenAI SDK's baseURL + its
+  // own /chat/completions suffix produces from this base) is the real,
+  // documented, token-authenticated path.
+  const gatewayBaseUrl = endpoint ? `${apiRoot}/genai/llmgw` : "";
   return { endpoint, token, model, gatewayBaseUrl };
 }
 
