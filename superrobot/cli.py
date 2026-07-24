@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -15,6 +16,7 @@ from rich.table import Table
 from superrobot import __version__
 from superrobot.setup.doctor import run_doctor
 from superrobot.setup.runner import run_setup
+from superrobot.shell_launcher import find_shell_entry
 
 if TYPE_CHECKING:
     from superrobot.models.gap_result import GapReport
@@ -28,6 +30,30 @@ app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
+
+# Args that should still go through Typer's own parsing/dispatch rather than
+# being handed off to the interactive shell.
+_KNOWN_SUBCOMMANDS = {
+    "doctor",
+    "setup",
+    "status",
+    "scan",
+    "analyze",
+    "generate",
+    "transform",
+    "validate",
+    "deploy",
+    "memory",
+    "receipt",
+}
+_KNOWN_GLOBAL_FLAGS = {
+    "--help",
+    "-h",
+    "--version",
+    "-V",
+    "--install-completion",
+    "--show-completion",
+}
 
 
 def _version_callback(value: bool) -> None:
@@ -44,6 +70,48 @@ def main(
     ] = None,
 ) -> None:
     """SuperRobot — DataRobot-native brownfield control plane."""
+
+
+def should_launch_shell(argv: list[str]) -> bool:
+    """True when argv doesn't look like a real subcommand invocation, so
+    `superrobot` (bare, or with shell-only flags like --print) should launch
+    the interactive shell instead of falling through to Typer's own parsing
+    (which would otherwise error on an unrecognized command/option)."""
+    if not argv:
+        return True
+    return argv[0] not in _KNOWN_SUBCOMMANDS and argv[0] not in _KNOWN_GLOBAL_FLAGS
+
+
+def launch_shell(argv: list[str]) -> None:
+    """Replace the current process with the built Pi shell, passing argv through."""
+    shell_entry = find_shell_entry()
+    if shell_entry is None:
+        console.print(
+            "[red]Interactive shell not found[/] — build it first:\n"
+            "  [cyan]cd shell && npm install && npm run build[/]\n"
+            "or set [cyan]SUPERROBOT_SHELL_DIR[/] to a directory containing dist/cli.js.\n\n"
+            "Run [cyan]superrobot --help[/] to see available subcommands instead."
+        )
+        raise typer.Exit(1)
+
+    node = shutil.which("node")
+    if node is None:
+        console.print("[red]node not found on PATH[/] — required to run the interactive shell.")
+        raise typer.Exit(1)
+
+    os.execvp(node, [node, str(shell_entry), *argv])
+
+
+def main_entry() -> None:
+    """Console-script entry point: launch the shell for bare/unrecognized
+    invocations, otherwise dispatch to Typer as usual."""
+    import sys
+
+    argv = sys.argv[1:]
+    if should_launch_shell(argv):
+        launch_shell(argv)
+        return
+    app()
 
 
 @app.command("doctor")

@@ -25,7 +25,7 @@ dev = [
 ]
 
 [project.scripts]
-superrobot = "superrobot.cli:app"
+superrobot = "superrobot.cli:main_entry"
 
 [build-system]
 requires = ["hatchling"]
