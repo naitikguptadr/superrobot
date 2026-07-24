@@ -28,11 +28,27 @@ def detect_framework(repo_graph: RepoGraph, entry_point: str | None) -> Framewor
     graph = repo_graph.graph
 
     reachable: set[str] = set()
-    if entry_point is not None:
-        # Extract the module from the entry point (e.g., "main.run_agent" -> "main")
-        module = entry_point.split(".")[0]
-        if module in graph:
-            reachable = nx.descendants(graph, module) | {module}
+    if entry_point is not None and entry_point in graph:
+        # Functions/classes actually reachable from the entry point via real
+        # `calls` edges (already correct: this is a genuine call-graph walk).
+        reachable_functions = nx.descendants(graph, entry_point) | {entry_point}
+        reachable |= reachable_functions
+
+        for func_node in reachable_functions:
+            # Find the function's real containing module via the reverse
+            # `defines` edge (module --defines--> function), never by
+            # string-splitting the node id -- entry points can be nested
+            # (e.g. "pkg.sub.run_agent" lives in module "pkg.sub", not "pkg").
+            for module_node, _, edge_attrs in graph.in_edges(func_node, data=True):
+                if edge_attrs.get("kind") != "defines":
+                    continue
+                reachable.add(module_node)
+                # A framework import only "counts" as reachable if it's
+                # actually imported by a module on the entry point's real
+                # call path, so pull in that module's `imports` targets too.
+                for _, imported, imports_attrs in graph.out_edges(module_node, data=True):
+                    if imports_attrs.get("kind") == "imports":
+                        reachable.add(imported)
 
     reachable_frameworks: dict[str, str] = {}
     unreachable_frameworks: dict[str, str] = {}
