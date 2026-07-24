@@ -1,0 +1,25 @@
+This is SuperRobot — it takes an existing Python agent, one you didn't build for DataRobot, and gets it running on the platform without a rewrite. No separate CLI to learn. You just talk to it.
+
+Those dots at the bottom are live — Gateway, Agent App, Workload, Memory. They're telling you exactly what this account is entitled to before you do anything.
+
+I'm not running a command. I'm just describing what I want. SuperRobot figures out the rest.
+
+First it scans the repo — no LLM call yet, pure static analysis. It's reading the actual code: what framework, what entry point, what environment variables it needs. That box on the left is tracking every stage live.
+
+Behind the scenes, each of these five stages — scan, transform, validate, deploy, receipts — is a real tool call the shell's chat agent invokes against the actual SuperRobot command line engine, not a script the model wrote up on the fly. A live stage-rail widget tracks progress, and every one of these tools runs sequentially, so two overlapping requests can't corrupt the pipeline's shared state.
+
+Now it generates a DataRobot-compliant package from what it just learned — flat imports, runtime parameters wired in three places, everything the platform actually requires. That's normally the part a developer spends a day getting right by hand.
+
+Before anything touches production, it runs a full set of validation checks — the same platform rules DataRobot itself enforces. Clean here means zero blocking issues.
+
+Now the interesting part. I'm asking it to deploy — to Workload API, using a container image that was already built.
+
+There are two ways to get that container image onto Workload API. You can build and push one yourself with Docker, then point SuperRobot at that image URI. Or you can skip Docker entirely and let DataRobot build it server-side — Code-to-Workload — where SuperRobot uploads your source, kicks off a remote build, and waits for it to finish. Tonight's deploy uses an image that was already built that second way.
+
+It doesn't just deploy. It stops and asks. And it tells you exactly what you're signing up for — build time, and a real platform gotcha about logs getting deleted on a failed Pulumi run. You decide, not the agent.
+
+And that's a real deployment — not a simulation. A moment ago I checked the DataRobot console directly: status running, two live replicas.
+
+Zooming out — the conversational shell you're watching is one half of SuperRobot. Underneath it is a headless Python engine that does the actual work: scan, transform, validate, deploy, receipts. That same engine talks to four different parts of the DataRobot platform depending on what you ask for — the LLM Gateway for chat, Workload API or Agent App for deployment, and the Memory API for agentic memory. The shell is just a friendly front door to all of it.
+
+Every step of this — the scan, the generated package, the deploy, even a platform bug we found and fixed along the way — happened against a real DataRobot environment tonight. That's SuperRobot: bring any agent to DataRobot, no rebuild required.
