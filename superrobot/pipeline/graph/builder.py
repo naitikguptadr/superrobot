@@ -16,6 +16,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import jedi
 import networkx as nx
 
 _EXCLUDED_DIR_NAMES = {"__pycache__", "venv", ".venv", "node_modules", ".git"}
@@ -95,21 +96,28 @@ def _qualified_name(node: ast.AST) -> list[str]:
 def build_repo_graph(repo_root: Path) -> RepoGraph:
     """Build a RepoGraph for the Python repo at repo_root.
 
-    Two passes: first ast-based structure (modules, function/class
-    definitions, defines/imports edges), then a separate call-resolution
-    pass (added in a later task) adds "calls" edges via jedi.
+    Pass 1: ast-based structure (modules, function/class definitions
+    with nested-qualified ids, defines/imports edges).
+    Pass 2: cross-file call resolution via jedi.Script.infer() -- NOT
+    .goto(), which only follows one hop to the import statement rather
+    than the true definition (verified against real jedi 0.20 behavior).
     """
     repo_root = Path(repo_root)
     graph = nx.DiGraph()
+    py_files = iter_python_files(repo_root)
+    file_asts: dict[Path, ast.Module] = {}
+    module_names: dict[Path, str] = {}
 
-    for py_file in iter_python_files(repo_root):
+    for py_file in py_files:
         try:
             source = py_file.read_text()
             tree = ast.parse(source, filename=str(py_file))
         except (SyntaxError, UnicodeDecodeError):
             continue
 
+        file_asts[py_file] = tree
         mod_name = module_dotted_name(py_file, repo_root)
+        module_names[py_file] = mod_name
         graph.add_node(mod_name, kind="module", path=str(py_file))
 
         _assign_parents(tree)
@@ -128,5 +136,50 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     graph.add_edge(mod_name, alias.name, kind="imports")
+
+    project = jedi.Project(path=str(repo_root))
+    for py_file, tree in file_asts.items():
+        mod_name = module_names[py_file]
+        try:
+            script = jedi.Script(path=str(py_file), project=project)
+        except Exception:
+            continue
+
+        for func_node in ast.walk(tree):
+            if not isinstance(func_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            caller_id = f"{mod_name}.{'.'.join(_qualified_name(func_node))}"
+
+            for call in ast.walk(func_node):
+                if not isinstance(call, ast.Call):
+                    continue
+                target = call.func
+                if isinstance(target, ast.Name):
+                    line, col = target.lineno, target.col_offset
+                elif isinstance(target, ast.Attribute):
+                    line = target.end_lineno
+                    col = target.end_col_offset - len(target.attr)
+                else:
+                    continue
+
+                try:
+                    inferred = script.infer(line=line, column=col)
+                except Exception:
+                    continue
+
+                for target_def in inferred:
+                    if not target_def.module_path or not target_def.full_name:
+                        continue
+                    target_path = Path(target_def.module_path)
+                    if not target_path.is_relative_to(repo_root):
+                        continue
+                    # jedi's full_name is already fully qualified through
+                    # enclosing classes (verified: a method f.search() on
+                    # class Foo infers full_name="pkg.tools.Foo.search"),
+                    # which matches this graph's node-id scheme exactly.
+                    # Do NOT reconstruct from target_def.name alone.
+                    callee_id = target_def.full_name
+                    if callee_id in graph:
+                        graph.add_edge(caller_id, callee_id, kind="calls")
 
     return RepoGraph(graph=graph, repo_root=repo_root)

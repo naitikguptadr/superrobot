@@ -112,3 +112,54 @@ def test_build_repo_graph_qualifies_nested_method_names(tmp_path: Path) -> None:
 
     assert graph.has_edge("pkg.tools", "pkg.tools.search")
     assert graph.has_edge("pkg.tools", "pkg.tools.Foo")
+
+
+def test_build_repo_graph_resolves_cross_file_calls(tmp_path: Path) -> None:
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text(
+        "def search(query: str) -> str:\n    return query\n"
+    )
+    (tmp_path / "main.py").write_text(
+        "from pkg.tools import search\n\n"
+        "def run_agent():\n"
+        "    return search('hello')\n\n"
+        "if __name__ == '__main__':\n"
+        "    run_agent()\n"
+    )
+
+    repo_graph = build_repo_graph(tmp_path)
+    graph = repo_graph.graph
+
+    assert graph.has_edge("main.run_agent", "pkg.tools.search")
+    assert graph.get_edge_data("main.run_agent", "pkg.tools.search")["kind"] == "calls"
+
+
+def test_build_repo_graph_resolves_cross_file_method_calls(tmp_path: Path) -> None:
+    """Regression test for the full_name qualification fix: a call to a
+    method on an imported class must resolve to the nested-qualified
+    node id (module.ClassName.method), not just module.method_name."""
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text(
+        "class Foo:\n"
+        "    def search(self, query: str) -> str:\n"
+        "        return query\n"
+    )
+    (tmp_path / "main.py").write_text(
+        "from pkg.tools import Foo\n\n"
+        "def run_agent():\n"
+        "    f = Foo()\n"
+        "    return f.search('hello')\n\n"
+        "if __name__ == '__main__':\n"
+        "    run_agent()\n"
+    )
+
+    repo_graph = build_repo_graph(tmp_path)
+    graph = repo_graph.graph
+
+    assert graph.has_edge("main.run_agent", "pkg.tools.Foo.search")
