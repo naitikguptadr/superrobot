@@ -137,6 +137,74 @@ def test_build_repo_graph_resolves_cross_file_calls(tmp_path: Path) -> None:
     assert graph.get_edge_data("main.run_agent", "pkg.tools.search")["kind"] == "calls"
 
 
+def test_build_repo_graph_resolves_relative_import_from_sibling(tmp_path: Path) -> None:
+    """`from .sibling import x` inside pkg/sub/mod.py must resolve to the
+    real sibling module id "pkg.sub.sibling", not the bare "sibling"."""
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "sub").mkdir()
+    (tmp_path / "pkg" / "sub" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "sub" / "sibling.py").write_text("x = 1\n")
+    (tmp_path / "pkg" / "sub" / "mod.py").write_text("from .sibling import x\n")
+
+    repo_graph = build_repo_graph(tmp_path)
+    graph = repo_graph.graph
+
+    assert graph.has_edge("pkg.sub.mod", "pkg.sub.sibling")
+    assert graph.get_edge_data("pkg.sub.mod", "pkg.sub.sibling")["kind"] == "imports"
+    # The unresolved bare name must NOT show up as the edge target.
+    assert not graph.has_edge("pkg.sub.mod", "sibling")
+
+
+def test_build_repo_graph_resolves_bare_relative_import_to_containing_package(
+    tmp_path: Path,
+) -> None:
+    """`from . import x` (level=1, module=None) has no dotted module name to
+    resolve, only a containing package -- we record an "imports" edge to
+    that containing package itself (pkg.sub), which is the right
+    granularity since this graph only tracks module-to-module edges, not
+    individual imported symbols."""
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "sub").mkdir()
+    (tmp_path / "pkg" / "sub" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "sub" / "sibling_module.py").write_text("")
+    (tmp_path / "pkg" / "sub" / "mod.py").write_text("from . import sibling_module\n")
+
+    repo_graph = build_repo_graph(tmp_path)
+    graph = repo_graph.graph
+
+    assert graph.has_edge("pkg.sub.mod", "pkg.sub")
+    assert graph.get_edge_data("pkg.sub.mod", "pkg.sub")["kind"] == "imports"
+
+
+def test_build_repo_graph_resolves_relative_import_within_init_uses_own_package(
+    tmp_path: Path,
+) -> None:
+    """`from .submodule import y` inside pkg/sub/__init__.py must resolve
+    against pkg.sub's OWN dotted name (pkg.sub is already its own
+    __package__), not its parent "pkg"."""
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "sub").mkdir()
+    (tmp_path / "pkg" / "sub" / "__init__.py").write_text("from .submodule import y\n")
+    (tmp_path / "pkg" / "sub" / "submodule.py").write_text("y = 1\n")
+
+    repo_graph = build_repo_graph(tmp_path)
+    graph = repo_graph.graph
+
+    assert graph.has_edge("pkg.sub", "pkg.sub.submodule")
+    assert graph.get_edge_data("pkg.sub", "pkg.sub.submodule")["kind"] == "imports"
+    # Must not be miscomputed against the parent package "pkg".
+    assert not graph.has_edge("pkg.sub", "pkg.submodule")
+
+
 def test_build_repo_graph_resolves_cross_file_method_calls(tmp_path: Path) -> None:
     """Regression test for the full_name qualification fix: a call to a
     method on an imported class must resolve to the nested-qualified

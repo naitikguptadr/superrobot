@@ -93,6 +93,47 @@ def _qualified_name(node: ast.AST) -> list[str]:
     return parts
 
 
+def _resolve_relative_import(
+    mod_name: str, is_package_init: bool, level: int, module: str | None
+) -> str | None:
+    """Resolve a relative import (``level`` >= 1) to an absolute dotted
+    module id, mirroring CPython's real import resolution
+    (``importlib._bootstrap._resolve_name``).
+
+    A regular module's ``__package__`` is its dotted name with the last
+    segment stripped; a package's ``__init__.py`` is already its own
+    ``__package__`` (its dotted name, as returned by
+    `module_dotted_name`, needs no further stripping). From that base,
+    ``level=1`` uses the base as-is, and each additional level strips one
+    more trailing segment.
+
+    For ``from . import x`` / ``from .. import x`` (``module is None``),
+    there's no dotted module name to resolve -- only a containing
+    package. Since this graph only tracks module-to-module "imports"
+    edges (not individual imported symbols), we resolve to that
+    containing package itself, which is the simplest correct choice at
+    this granularity.
+
+    Returns None if there is no parent package to resolve against (a
+    top-level, non-package module) or if ``level`` goes beyond the top of
+    the package hierarchy -- matching Python's own "attempted relative
+    import beyond top-level package" failure, rather than crashing or
+    fabricating a bogus id.
+    """
+    base = mod_name if is_package_init else mod_name.rsplit(".", 1)[0] if "." in mod_name else ""
+
+    if not base:
+        return None
+
+    base_parts = base.split(".")
+    strip_count = level - 1
+    if strip_count >= len(base_parts):
+        return None
+    stripped_base = ".".join(base_parts[: len(base_parts) - strip_count])
+
+    return f"{stripped_base}.{module}" if module is not None else stripped_base
+
+
 def build_repo_graph(repo_root: Path) -> RepoGraph:
     """Build a RepoGraph for the Python repo at repo_root.
 
@@ -130,9 +171,18 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
                 graph.add_node(qual_id, kind=node_kind, path=str(py_file), line=node.lineno)
                 graph.add_edge(mod_name, qual_id, kind="defines")
 
+        is_package_init = py_file.stem == "__init__"
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                graph.add_edge(mod_name, node.module, kind="imports")
+            if isinstance(node, ast.ImportFrom):
+                if node.level == 0:
+                    if node.module:
+                        graph.add_edge(mod_name, node.module, kind="imports")
+                else:
+                    resolved_target = _resolve_relative_import(
+                        mod_name, is_package_init, node.level, node.module
+                    )
+                    if resolved_target is not None:
+                        graph.add_edge(mod_name, resolved_target, kind="imports")
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     graph.add_edge(mod_name, alias.name, kind="imports")
