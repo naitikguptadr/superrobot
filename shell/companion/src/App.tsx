@@ -1,13 +1,29 @@
-import { Badge } from '@datarobot/design-system/badge'
+import { useEffect, useState } from "react";
+import type { JSX } from "react";
+import { PipelineView } from "./PipelineView";
+import type { PipelineState } from "./pipeline-types";
 
-function App() {
-  return (
-    <section id="center">
-      <h1>SuperRobot Companion</h1>
-      <p>Pipeline status companion UI — scaffold placeholder.</p>
-      <Badge success>test</Badge>
-    </section>
-  )
+export function App(): JSX.Element {
+  const [state, setState] = useState<PipelineState>([]);
+
+  useEffect(() => {
+    if (typeof WebSocket === "undefined") {
+      return;
+    }
+
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(`ws://${window.location.host}/ws`);
+    } catch {
+      return;
+    }
+
+    ws.onmessage = (event) => {
+      setState(JSON.parse(event.data) as PipelineState);
+    };
+
+    return () => ws.close();
+  }, []);
+
+  return <PipelineView state={state} />;
 }
-
-export default App
