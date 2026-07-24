@@ -11,11 +11,13 @@ node_modules/
 shell/dist/
 shell/build/
 shell/package-lock.json
+shell/companion/package-lock.json
 /build/
 .DS_Store
 .env
 .superrobot/
 *.html
+!shell/companion/index.html
 graphify-out/
 .codegraph/
 .superpowers/
