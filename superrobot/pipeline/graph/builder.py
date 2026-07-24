@@ -207,30 +207,48 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
 
         is_package_init = py_file.stem == "__init__"
         type_checking_guarded_ids = _type_checking_guarded_node_ids(tree)
+        # The same module can be imported more than once from the same
+        # source file (e.g. once for real, once again inside an
+        # `if TYPE_CHECKING:` block). Since `add_edge()` on an
+        # already-existing edge OVERWRITES its attributes rather than
+        # merging them, calling it once per import statement would make
+        # the outcome depend on ast.walk()'s traversal order -- whichever
+        # statement is processed last would win, even if an earlier real
+        # import should have. Instead, collect every occurrence per
+        # (source, target) pair first, and only mark the edge
+        # type_checking_only if ALL of its imports were TYPE_CHECKING-only.
+        import_targets: dict[str, bool] = {}
+        import_target_names: list[str] = []
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
-                # Only ever set True: a real, executed import is left
-                # without the key at all (rather than an explicit False),
-                # so downstream consumers can use a simple
-                # `.get("type_checking_only", False)` check.
-                edge_kwargs = (
-                    {"type_checking_only": True} if id(node) in type_checking_guarded_ids else {}
-                )
+                is_guarded = id(node) in type_checking_guarded_ids
                 if node.level == 0:
-                    if node.module:
-                        graph.add_edge(mod_name, node.module, kind="imports", **edge_kwargs)
+                    import_target_names = [node.module] if node.module else []
                 else:
                     resolved_target = _resolve_relative_import(
                         mod_name, is_package_init, node.level, node.module
                     )
-                    if resolved_target is not None:
-                        graph.add_edge(mod_name, resolved_target, kind="imports", **edge_kwargs)
+                    import_target_names = [resolved_target] if resolved_target is not None else []
             elif isinstance(node, ast.Import):
-                edge_kwargs = (
-                    {"type_checking_only": True} if id(node) in type_checking_guarded_ids else {}
+                is_guarded = id(node) in type_checking_guarded_ids
+                import_target_names = [alias.name for alias in node.names]
+            else:
+                continue
+
+            for import_target_name in import_target_names:
+                # A target already known to have a real import stays real
+                # regardless of what any other occurrence says.
+                import_targets[import_target_name] = (
+                    import_targets.get(import_target_name, True) and is_guarded
                 )
-                for alias in node.names:
-                    graph.add_edge(mod_name, alias.name, kind="imports", **edge_kwargs)
+
+        for import_target_name, all_guarded in import_targets.items():
+            # Only ever set True: a real, executed import is left without
+            # the key at all (rather than an explicit False), so
+            # downstream consumers can use a simple
+            # `.get("type_checking_only", False)` check.
+            edge_kwargs = {"type_checking_only": True} if all_guarded else {}
+            graph.add_edge(mod_name, import_target_name, kind="imports", **edge_kwargs)
 
     project = jedi.Project(path=str(repo_root))
     for py_file, tree in file_asts.items():

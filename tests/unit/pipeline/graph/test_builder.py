@@ -242,6 +242,61 @@ def test_build_repo_graph_does_not_tag_normal_import_as_type_checking_only(
     assert not edge_data.get("type_checking_only", False)
 
 
+def test_build_repo_graph_real_import_wins_when_type_checking_import_comes_first(
+    tmp_path: Path,
+) -> None:
+    """A module imported both inside `if TYPE_CHECKING:` and for real (at
+    runtime) must NOT be marked type_checking_only -- the real import
+    always wins, regardless of ast.walk() traversal order. This variant
+    puts the TYPE_CHECKING-guarded import first in source order, the
+    layout most likely to trigger an order-dependent edge-attribute bug
+    (since add_edge() on an existing edge overwrites its attributes)."""
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "main.py").write_text(
+        "from typing import TYPE_CHECKING\n\n"
+        "if TYPE_CHECKING:\n"
+        "    import json\n\n"
+        "import json\n\n"
+        "def run():\n"
+        "    pass\n"
+    )
+
+    repo_graph = build_repo_graph(tmp_path)
+    graph = repo_graph.graph
+
+    assert graph.has_edge("main", "json")
+    edge_data = graph.get_edge_data("main", "json")
+    assert edge_data["kind"] == "imports"
+    assert not edge_data.get("type_checking_only", False)
+
+
+def test_build_repo_graph_real_import_wins_when_type_checking_import_comes_second(
+    tmp_path: Path,
+) -> None:
+    """Same scenario as above but with the real import appearing first and
+    the TYPE_CHECKING-guarded duplicate second, to cover both possible
+    traversal orderings."""
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "main.py").write_text(
+        "import json\n\n"
+        "from typing import TYPE_CHECKING\n\n"
+        "if TYPE_CHECKING:\n"
+        "    import json\n\n"
+        "def run():\n"
+        "    pass\n"
+    )
+
+    repo_graph = build_repo_graph(tmp_path)
+    graph = repo_graph.graph
+
+    assert graph.has_edge("main", "json")
+    edge_data = graph.get_edge_data("main", "json")
+    assert edge_data["kind"] == "imports"
+    assert not edge_data.get("type_checking_only", False)
+
+
 def test_build_repo_graph_resolves_cross_file_method_calls(tmp_path: Path) -> None:
     """Regression test for the full_name qualification fix: a call to a
     method on an imported class must resolve to the nested-qualified
