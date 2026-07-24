@@ -14,12 +14,17 @@ export function App(): JSX.Element {
     let ws: WebSocket;
     try {
       ws = new WebSocket(`ws://${window.location.host}/ws`);
-    } catch {
+    } catch (error) {
+      console.error("[superrobot companion] websocket constructor error", error);
       return;
     }
 
     ws.onmessage = (event) => {
       setState(JSON.parse(event.data) as PipelineState);
+    };
+
+    ws.onerror = (event) => {
+      console.error("[superrobot companion] websocket error", event);
     };
 
     return () => ws.close();
