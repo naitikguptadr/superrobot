@@ -1236,16 +1236,17 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'superrobot.pipeline.g
 Create `superrobot/pipeline/graph/gap_analysis.py`:
 
 ```python
-"""Graph-native gap analysis checks. Reuses GapFinding from the existing
-superrobot.pipeline.gap_analysis module so results compose with today's
-GapReport unchanged -- this adds one new check, it does not replace the
-existing file-scan-based rules (flat-imports, endpoint-usage,
-pyproject-removal, runtime-param), which stay as they are for now.
+"""Graph-native gap analysis checks. Reuses GapFinding from the canonical
+superrobot.models.gap_result module (superrobot.pipeline.gap_analysis
+does not re-export it) so results compose with today's GapReport
+unchanged -- this adds one new check, it does not replace the existing
+file-scan-based rules (flat-imports, endpoint-usage, pyproject-removal,
+runtime-param), which stay as they are for now.
 """
 
 from __future__ import annotations
 
-from superrobot.pipeline.gap_analysis import GapFinding
+from superrobot.models.gap_result import GapFinding
 from superrobot.pipeline.graph.builder import RepoGraph
 from superrobot.pipeline.graph.framework_detect import detect_framework
 
