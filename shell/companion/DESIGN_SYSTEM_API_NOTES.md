@@ -3,15 +3,27 @@
 Scratch reference for the next task's implementer. Read directly from:
 `node_modules/@datarobot/design-system/esm/{stepper,badge,granular-progress-bar}/*.d.ts`
 
-Import paths that work (barrel re-exports everything):
+Import paths that work — **subpath imports only**, NOT the root package:
 ```ts
-import { Stepper, Badge, GranularProgressBar } from '@datarobot/design-system'
-import type { Step, StepKey, StepperProps, BadgeProps, GranularProgressBarProps } from '@datarobot/design-system'
+import { Stepper } from '@datarobot/design-system/stepper'
+import { Badge } from '@datarobot/design-system/badge'
+import { GranularProgressBar } from '@datarobot/design-system/granular-progress-bar'
+import type { Step, StepKey, StepperProps } from '@datarobot/design-system/stepper'
+import type { BadgeProps } from '@datarobot/design-system/badge'
+import type { GranularProgressBarProps } from '@datarobot/design-system/granular-progress-bar'
 ```
+The root `@datarobot/design-system/package.json` has **no** `main`, `module`,
+`types`, or `exports` field at all, so `import { Badge } from '@datarobot/design-system'`
+fails both `tsc` (`TS2307: Cannot find module '@datarobot/design-system'`) and
+`vite build` (`Rolldown failed to resolve import "@datarobot/design-system"`).
+Verified directly against `node_modules/@datarobot/design-system/package.json`.
+
 Note: the per-component subpath `package.json` files (e.g. `stepper/package.json`)
-set `"types": "../esm/index.d.ts"` — i.e. they all point at the top-level barrel
-`esm/index.d.ts`, not a per-component `.d.ts`. Subpath imports like
-`@datarobot/design-system/stepper` resolve types the same way as the root import.
+have real `main`/`module` fields (e.g. `"module": "../esm/stepper"`) but all set
+`"types": "../esm/index.d.ts"` — i.e. types resolve via the top-level barrel
+`esm/index.d.ts`, not a per-component `.d.ts`. That's fine; only the root
+package's own `package.json` (used for the bare, no-subpath import) is missing
+the fields entirely, which is what breaks the bare import.
 
 ## Stepper (`stepper/types.ts`, `stepper/stepper.ts`)
 
