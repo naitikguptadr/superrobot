@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from superrobot.setup.models import SetupState
 
 console = Console()
+console_err = Console(stderr=True)
 app = typer.Typer(
     name="superrobot",
     help="Bring any Python agent to DataRobot — migrate, validate, deploy, operate.",
@@ -554,7 +555,11 @@ async def _deploy_agent_app(
     for warning in DEPLOY_WARNINGS:
         if not has_ui and "Frontend" in warning:
             continue
-        console.print(f"[yellow]![/] {warning}")
+        # Always stderr, never stdout -- printing to stdout unconditionally
+        # here corrupted `--json` output (the JSON payload printed further
+        # below shares stdout, and JSON.parse requires the whole stream to
+        # be valid JSON with nothing prepended).
+        console_err.print(f"[yellow]![/] {warning}")
 
     result = await deploy(cwd=str(path), has_ui=has_ui)
     payload = {
@@ -735,7 +740,10 @@ def receipt_show_cmd(
 
     receipt = load_receipt(receipt_id, config_dir) if receipt_id else latest_receipt(config_dir)
     if receipt is None:
-        console.print("[yellow]No receipts found[/]")
+        if json_out:
+            console.print_json(json.dumps({"error": "no receipts found"}))
+        else:
+            console.print("[yellow]No receipts found[/]")
         raise typer.Exit(1)
     if json_out:
         console.print_json(receipt.model_dump_json())

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from superrobot.cli import _gap_gate, app
@@ -136,6 +137,38 @@ def test_deploy_agent_app_blocked_by_gap_analysis(tmp_path: Path) -> None:
     )
     assert result.exit_code == 1
     assert "Deploy refused" in result.stdout
+
+
+def test_deploy_agent_app_json_output_is_pure_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: DEPLOY_WARNINGS used to print to stdout unconditionally,
+    corrupting `--json` output with plain-text lines before the JSON payload."""
+    from superrobot.dr.cli_wrapper import DrCommandResult
+
+    class _FakeWrapper:
+        async def task_run_deploy(self, cwd: str | None = None) -> DrCommandResult:
+            return DrCommandResult(0, "deployed", "")
+
+    monkeypatch.setattr("superrobot.pipeline.deployer.DrCliWrapper", _FakeWrapper)
+
+    result = runner.invoke(
+        app,
+        [
+            "deploy",
+            str(tmp_path),
+            "--target",
+            "agent-app",
+            "--waive",
+            "--config-dir",
+            str(tmp_path),
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)  # raises if anything but JSON is on stdout
+    assert payload["success"] is True
+    assert payload["target"] == "agent-app"
 
 
 def test_deploy_workload_blocked_by_gap_analysis_after_entitlement_checks(
