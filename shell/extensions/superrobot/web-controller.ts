@@ -79,12 +79,11 @@ export function createWebController(options: WebControllerOptions = {}): WebCont
       const newWss = new WebSocketServer({ server: newServer, path: "/ws" });
       newWss.on("connection", (ws) => {
         clients.add(ws);
-        // Deliberately no initial `ws.send(latestState)` here: a client that
-        // connects mid-pipeline picks up the current picture on the very
-        // next update() broadcast. (Pushing eagerly here would race with --
-        // and always win against -- a caller that triggers an update() from
-        // its own "connection is open" handler, since this fires before the
-        // client-side 'open' event ever could.)
+        // Push the current state immediately so a client that connects
+        // mid-pipeline (e.g. during a 15-20 minute "deploy" stage) sees the
+        // live picture right away instead of staring at a blank view until
+        // the next update() call happens to fire.
+        ws.send(JSON.stringify(latestState));
         ws.on("close", () => clients.delete(ws));
       });
 
