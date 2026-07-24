@@ -13,20 +13,26 @@ type ToolExecute = (
   onUpdate: unknown,
   ctx: ExtensionContext,
 ) => Promise<{ content: Array<{ type: string; text: string }>; details: unknown }>;
+type EventHandler = (event: unknown, ctx?: ExtensionContext) => unknown;
 
 /** Captures every tool registered via pi.registerTool() and fakes pi.exec() with a caller-supplied impl. */
 function fakePi(execImpl: (args: string[]) => ExecResult): {
   pi: ExtensionAPI;
   tools: Map<string, ToolExecute>;
+  handlers: Map<string, EventHandler>;
 } {
   const tools = new Map<string, ToolExecute>();
+  const handlers = new Map<string, EventHandler>();
   const pi = {
     registerTool(tool: { name: string; execute: ToolExecute }) {
       tools.set(tool.name, tool.execute);
     },
+    on(event: string, handler: EventHandler) {
+      handlers.set(event, handler);
+    },
     exec: async (_command: string, args: string[]) => execImpl(args),
   } as unknown as ExtensionAPI;
-  return { pi, tools };
+  return { pi, tools, handlers };
 }
 
 function fakeCtx(notifyCalls?: string[]): ExtensionContext {
@@ -150,4 +156,56 @@ test("superrobot_scan's own failure path is unaffected by a broken web companion
     () => scan!("id1", { path: "x" }, undefined, undefined, fakeCtx()),
     /superrobot scan failed/,
   );
+});
+
+test("session_shutdown does not throw when no pipeline tool has run yet (no controllers created)", async () => {
+  const { pi, handlers } = fakePi(scanExecOk());
+  registerSuperRobotTools(pi, () => {
+    throw new Error("web controller should never be constructed in this test");
+  });
+
+  const shutdown = handlers.get("session_shutdown");
+  assert.ok(shutdown, "session_shutdown handler should be registered");
+  await assert.doesNotReject(() => Promise.resolve(shutdown!({ type: "session_shutdown", reason: "quit" })));
+});
+
+test("session_shutdown stops both the rail and web controllers once they've been created", async () => {
+  const { pi, tools, handlers } = fakePi(scanExecOk());
+  const webStopCalls: string[] = [];
+  const fakeWebController: WebController = {
+    start: async () => ({ port: 4321 }),
+    update: () => {},
+    stop: async () => {
+      webStopCalls.push("stopped");
+    },
+  };
+  registerSuperRobotTools(pi, () => fakeWebController);
+
+  // A ctx whose setWidget records calls instead of throwing, so the pipeline
+  // tool arms the rail's real setInterval -- and so we can observe
+  // RailController.stop()'s call to ctx.ui.setWidget(key, undefined), which
+  // is otherwise not externally observable since RailController exposes no
+  // "was stop() called" flag of its own.
+  const setWidgetCalls: Array<[string, unknown]> = [];
+  const ctx = {
+    ui: {
+      setWidget: (key: string, value: unknown) => {
+        setWidgetCalls.push([key, value]);
+      },
+      confirm: async () => true,
+      notify: () => {},
+    },
+  } as unknown as ExtensionContext;
+
+  const scan = tools.get("superrobot_scan");
+  assert.ok(scan, "superrobot_scan should be registered");
+  await scan!("id1", { path: "tests/fixtures/langchain_agent" }, undefined, undefined, ctx);
+
+  const shutdown = handlers.get("session_shutdown");
+  assert.ok(shutdown, "session_shutdown handler should be registered");
+  await shutdown!({ type: "session_shutdown", reason: "quit" });
+
+  assert.deepEqual(webStopCalls, ["stopped"], "WebController.stop() should be awaited");
+  const lastSetWidgetCall = setWidgetCalls.at(-1);
+  assert.equal(lastSetWidgetCall?.[1], undefined, "RailController.stop() should clear the widget");
 });
