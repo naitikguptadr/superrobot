@@ -58,9 +58,7 @@ def test_build_repo_graph_structure_pass(tmp_path: Path) -> None:
 
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("")
-    (tmp_path / "pkg" / "tools.py").write_text(
-        "def search(query: str) -> str:\n    return query\n"
-    )
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query: str) -> str:\n    return query\n")
     (tmp_path / "main.py").write_text(
         "from pkg.tools import search\n\n"
         "def run_agent():\n"
@@ -119,9 +117,7 @@ def test_build_repo_graph_resolves_cross_file_calls(tmp_path: Path) -> None:
 
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("")
-    (tmp_path / "pkg" / "tools.py").write_text(
-        "def search(query: str) -> str:\n    return query\n"
-    )
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query: str) -> str:\n    return query\n")
     (tmp_path / "main.py").write_text(
         "from pkg.tools import search\n\n"
         "def run_agent():\n"
@@ -214,9 +210,7 @@ def test_build_repo_graph_resolves_cross_file_method_calls(tmp_path: Path) -> No
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("")
     (tmp_path / "pkg" / "tools.py").write_text(
-        "class Foo:\n"
-        "    def search(self, query: str) -> str:\n"
-        "        return query\n"
+        "class Foo:\n    def search(self, query: str) -> str:\n        return query\n"
     )
     (tmp_path / "main.py").write_text(
         "from pkg.tools import Foo\n\n"

@@ -10,10 +10,7 @@ from superrobot.pipeline.graph.entry_points import resolve_entry_point
 
 def test_resolves_entry_point_from_main_guard(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
-        "def run_agent():\n"
-        "    return 'ok'\n\n"
-        "if __name__ == '__main__':\n"
-        "    run_agent()\n"
+        "def run_agent():\n    return 'ok'\n\nif __name__ == '__main__':\n    run_agent()\n"
     )
     repo_graph = build_repo_graph(tmp_path)
 
@@ -21,10 +18,7 @@ def test_resolves_entry_point_from_main_guard(tmp_path: Path) -> None:
 
 
 def test_prefers_pyproject_console_script(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text(
-        "[project.scripts]\n"
-        'myagent = "main:run_agent"\n'
-    )
+    (tmp_path / "pyproject.toml").write_text('[project.scripts]\nmyagent = "main:run_agent"\n')
     (tmp_path / "main.py").write_text(
         "def run_agent():\n"
         "    return 'ok'\n\n"

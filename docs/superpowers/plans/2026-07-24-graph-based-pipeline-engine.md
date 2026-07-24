@@ -232,9 +232,7 @@ def test_build_repo_graph_structure_pass(tmp_path: Path) -> None:
 
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("")
-    (tmp_path / "pkg" / "tools.py").write_text(
-        "def search(query: str) -> str:\n    return query\n"
-    )
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query: str) -> str:\n    return query\n")
     (tmp_path / "main.py").write_text(
         "from pkg.tools import search\n\n"
         "def run_agent():\n"
@@ -344,9 +342,7 @@ def test_build_repo_graph_resolves_cross_file_calls(tmp_path: Path) -> None:
 
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("")
-    (tmp_path / "pkg" / "tools.py").write_text(
-        "def search(query: str) -> str:\n    return query\n"
-    )
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query: str) -> str:\n    return query\n")
     (tmp_path / "main.py").write_text(
         "from pkg.tools import search\n\n"
         "def run_agent():\n"
@@ -507,10 +503,7 @@ from superrobot.pipeline.graph.entry_points import resolve_entry_point
 
 def test_resolves_entry_point_from_main_guard(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
-        "def run_agent():\n"
-        "    return 'ok'\n\n"
-        "if __name__ == '__main__':\n"
-        "    run_agent()\n"
+        "def run_agent():\n    return 'ok'\n\nif __name__ == '__main__':\n    run_agent()\n"
     )
     repo_graph = build_repo_graph(tmp_path)
 
@@ -518,10 +511,7 @@ def test_resolves_entry_point_from_main_guard(tmp_path: Path) -> None:
 
 
 def test_prefers_pyproject_console_script(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text(
-        "[project.scripts]\n"
-        'myagent = "main:run_agent"\n'
-    )
+    (tmp_path / "pyproject.toml").write_text('[project.scripts]\nmyagent = "main:run_agent"\n')
     (tmp_path / "main.py").write_text(
         "def run_agent():\n"
         "    return 'ok'\n\n"
@@ -690,9 +680,7 @@ def test_detects_reachable_framework_with_high_confidence(tmp_path: Path) -> Non
 
 def test_flags_unreachable_framework_import_separately(tmp_path: Path) -> None:
     (tmp_path / "dead_code.py").write_text(
-        "from crewai import Agent\n\n"
-        "def unused():\n"
-        "    return Agent\n"
+        "from crewai import Agent\n\ndef unused():\n    return Agent\n"
     )
     (tmp_path / "main.py").write_text(
         "from langgraph.graph import StateGraph\n\n"
@@ -861,9 +849,7 @@ from superrobot.pipeline.graph.queries import callers_of, imports_of, reachable_
 def _build(tmp_path: Path) -> "RepoGraph":  # noqa: F821 - forward ref in docstring only
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("")
-    (tmp_path / "pkg" / "tools.py").write_text(
-        "def search(query: str) -> str:\n    return query\n"
-    )
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query: str) -> str:\n    return query\n")
     (tmp_path / "main.py").write_text(
         "from pkg.tools import search\n\n"
         "def run_agent():\n"
@@ -1188,9 +1174,7 @@ from superrobot.pipeline.graph.gap_analysis import check_unreachable_frameworks
 
 def test_flags_unreachable_framework_as_warning(tmp_path: Path) -> None:
     (tmp_path / "dead_code.py").write_text(
-        "from crewai import Agent\n\n"
-        "def unused():\n"
-        "    return Agent\n"
+        "from crewai import Agent\n\ndef unused():\n    return Agent\n"
     )
     (tmp_path / "main.py").write_text(
         "from langgraph.graph import StateGraph\n\n"
