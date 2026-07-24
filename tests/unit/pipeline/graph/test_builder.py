@@ -84,3 +84,31 @@ def test_build_repo_graph_structure_pass(tmp_path: Path) -> None:
 
     assert graph.has_edge("main", "pkg.tools")
     assert graph.get_edge_data("main", "pkg.tools")["kind"] == "imports"
+
+
+def test_build_repo_graph_qualifies_nested_method_names(tmp_path: Path) -> None:
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text(
+        "def search(query: str) -> str:\n"
+        "    return query\n\n"
+        "class Foo:\n"
+        "    def search(self, query: str) -> str:\n"
+        "        return query\n"
+    )
+
+    repo_graph = build_repo_graph(tmp_path)
+    graph = repo_graph.graph
+
+    # The top-level function must still exist under its own id.
+    assert graph.nodes["pkg.tools.search"]["kind"] == "function"
+
+    # The method must be qualified through its enclosing class, not collide
+    # with the top-level function of the same name.
+    assert graph.nodes["pkg.tools.Foo.search"]["kind"] == "function"
+    assert graph.nodes["pkg.tools.Foo"]["kind"] == "class"
+
+    assert graph.has_edge("pkg.tools", "pkg.tools.search")
+    assert graph.has_edge("pkg.tools", "pkg.tools.Foo")

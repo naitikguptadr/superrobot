@@ -63,6 +63,35 @@ class RepoGraph:
         return cls(graph=graph, repo_root=repo_root)
 
 
+def _assign_parents(tree: ast.AST) -> None:
+    """Set a `.parent` attribute on every child node in the tree.
+
+    ast doesn't track parent pointers itself, so a single pass over the
+    tree records, for each node, the node whose child it is. This lets us
+    later walk up from any definition to discover its enclosing scopes.
+    """
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            child.parent = parent
+
+
+def _qualified_name(node: ast.AST) -> list[str]:
+    """Collect enclosing FunctionDef/AsyncFunctionDef/ClassDef names for node.
+
+    Walks up the `.parent` chain (set by `_assign_parents`) and gathers the
+    names of enclosing function/class scopes, then reverses the result so
+    it reads outermost-to-innermost, ending with `node` itself.
+    """
+    parts: list[str] = []
+    current: ast.AST | None = node
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            parts.append(current.name)
+        current = getattr(current, "parent", None)
+    parts.reverse()
+    return parts
+
+
 def build_repo_graph(repo_root: Path) -> RepoGraph:
     """Build a RepoGraph for the Python repo at repo_root.
 
@@ -83,9 +112,12 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
         mod_name = module_dotted_name(py_file, repo_root)
         graph.add_node(mod_name, kind="module", path=str(py_file))
 
+        _assign_parents(tree)
+
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                qual_id = f"{mod_name}.{node.name}"
+                qualified_parts = _qualified_name(node)
+                qual_id = f"{mod_name}.{'.'.join(qualified_parts)}"
                 node_kind = "class" if isinstance(node, ast.ClassDef) else "function"
                 graph.add_node(qual_id, kind=node_kind, path=str(py_file), line=node.lineno)
                 graph.add_edge(mod_name, qual_id, kind="defines")
