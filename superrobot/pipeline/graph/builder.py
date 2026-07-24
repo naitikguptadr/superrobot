@@ -134,6 +134,40 @@ def _resolve_relative_import(
     return f"{stripped_base}.{module}" if module is not None else stripped_base
 
 
+def _is_type_checking_guard(node: ast.If) -> bool:
+    """True if node's test is `TYPE_CHECKING` or `typing.TYPE_CHECKING`.
+
+    Mirrors the style of entry_points._is_main_guard(): a narrow,
+    structural check of the `ast.If` node's test expression, not a full
+    symbolic evaluation. `if TYPE_CHECKING:` is the standard mypy/typing
+    idiom for imports that only exist for static type-checkers -- they
+    are never executed at runtime (`TYPE_CHECKING` is `False` at runtime,
+    `True` only to type checkers).
+    """
+    test = node.test
+    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+        return True
+    return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+
+
+def _type_checking_guarded_node_ids(tree: ast.AST) -> set[int]:
+    """Collect id() of every node in the `body` (never the `orelse`) of an
+    `if TYPE_CHECKING:` guard anywhere in tree.
+
+    Only the guard's `body` never executes at runtime; an `else` branch on
+    such a guard (uncommon, but legal) is real, executed code and must not
+    be swept up here.
+    """
+    guarded_ids: set[int] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.If) and _is_type_checking_guard(node)):
+            continue
+        for stmt in node.body:
+            for sub in ast.walk(stmt):
+                guarded_ids.add(id(sub))
+    return guarded_ids
+
+
 def build_repo_graph(repo_root: Path) -> RepoGraph:
     """Build a RepoGraph for the Python repo at repo_root.
 
@@ -172,20 +206,31 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
                 graph.add_edge(mod_name, qual_id, kind="defines")
 
         is_package_init = py_file.stem == "__init__"
+        type_checking_guarded_ids = _type_checking_guarded_node_ids(tree)
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
+                # Only ever set True: a real, executed import is left
+                # without the key at all (rather than an explicit False),
+                # so downstream consumers can use a simple
+                # `.get("type_checking_only", False)` check.
+                edge_kwargs = (
+                    {"type_checking_only": True} if id(node) in type_checking_guarded_ids else {}
+                )
                 if node.level == 0:
                     if node.module:
-                        graph.add_edge(mod_name, node.module, kind="imports")
+                        graph.add_edge(mod_name, node.module, kind="imports", **edge_kwargs)
                 else:
                     resolved_target = _resolve_relative_import(
                         mod_name, is_package_init, node.level, node.module
                     )
                     if resolved_target is not None:
-                        graph.add_edge(mod_name, resolved_target, kind="imports")
+                        graph.add_edge(mod_name, resolved_target, kind="imports", **edge_kwargs)
             elif isinstance(node, ast.Import):
+                edge_kwargs = (
+                    {"type_checking_only": True} if id(node) in type_checking_guarded_ids else {}
+                )
                 for alias in node.names:
-                    graph.add_edge(mod_name, alias.name, kind="imports")
+                    graph.add_edge(mod_name, alias.name, kind="imports", **edge_kwargs)
 
     project = jedi.Project(path=str(repo_root))
     for py_file, tree in file_asts.items():
