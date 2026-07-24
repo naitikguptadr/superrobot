@@ -363,4 +363,24 @@ export function registerSuperRobotTools(
       return { content: [{ type: "text", text: JSON.stringify(result.data) }], details: result.data as object };
     },
   });
+
+  // rail/web are designed to persist for the whole shell session (so status
+  // survives across multiple pipeline tool calls), but nothing calls .stop()
+  // on them today -- they rely on the whole Node process exiting to
+  // implicitly release the rail's setInterval and the web server's HTTP+WS
+  // listeners. That's wasteful when a session ends via Pi's own
+  // session-switching (fork/resume/new) without the process itself exiting.
+  // session_shutdown fires in exactly that case, so use it to release both
+  // resources and reset the singletons back to their initial unset state --
+  // this closure could in principle be reused by a fresh session, and even if
+  // that's not how Pi actually works today, recreating fresh controllers
+  // rather than reusing stale, stopped ones is the defensively correct thing
+  // to do.
+  pi.on("session_shutdown", async () => {
+    rail?.stop();
+    if (web) await web.stop();
+    rail = undefined;
+    web = undefined;
+    hasNotifiedWebUrl = false;
+  });
 }
