@@ -13,7 +13,22 @@ from dataclasses import dataclass, field
 import networkx as nx
 
 from superrobot.pipeline.graph.builder import RepoGraph
-from superrobot.pipeline.scanner import FRAMEWORK_IMPORTS
+from superrobot.pipeline.scanner import ENTRY_POINT_NAMES, FRAMEWORK_IMPORTS
+
+# scanner.py's raw-async fallback: no known agent framework import, but the
+# repo directly drives an async HTTP client. Kept as a distinct, narrow
+# signal (never mistaken for a real framework import) so it only fires once
+# every FRAMEWORK_IMPORTS prefix has already come up empty.
+RAW_ASYNC_IMPORTS = frozenset({"httpx", "aiohttp"})
+
+# scanner._compute_confidence() adds +0.1 whenever it finds at least one
+# function whose name looks like a real entry point (see
+# scanner.ENTRY_POINT_NAMES / the "run_" prefix convention). The graph-based
+# path mirrors that exact bonus so confidence here is never lower than
+# scanner.py's for the same repo, even when resolve_entry_point() can't
+# find a `if __name__ == "__main__":` guard or console-script (most real
+# fixtures have neither) and reachability falls back to "everything counts".
+_ENTRY_SIGNAL_BONUS = 0.1
 
 
 @dataclass
@@ -72,16 +87,72 @@ def detect_framework(repo_graph: RepoGraph, entry_point: str | None) -> Framewor
                     "confirm this isn't leftover from an abandoned migration"
                 )
 
+    entry_bonus = _ENTRY_SIGNAL_BONUS if _has_entry_point_signal(graph, reachable) else 0.0
+
     if reachable_frameworks:
         framework = next(iter(reachable_frameworks))
         return FrameworkDetection(
-            framework=framework, confidence=0.95, unreachable_warnings=unreachable_warnings
+            framework=framework,
+            confidence=min(1.0, 0.9 + entry_bonus),
+            unreachable_warnings=unreachable_warnings,
         )
 
     if unreachable_frameworks:
         framework = next(iter(unreachable_frameworks))
         return FrameworkDetection(
-            framework=framework, confidence=0.4, unreachable_warnings=unreachable_warnings
+            framework=framework,
+            confidence=min(1.0, 0.4 + entry_bonus),
+            unreachable_warnings=unreachable_warnings,
+        )
+
+    if _has_raw_async_imports(graph, reachable):
+        return FrameworkDetection(
+            framework="raw_async",
+            confidence=min(1.0, 0.4 + entry_bonus),
+            unreachable_warnings=unreachable_warnings,
         )
 
     return FrameworkDetection(framework="unknown", confidence=0.2)
+
+
+def _has_entry_point_signal(graph: nx.DiGraph, reachable: set[str]) -> bool:
+    """True if a function shaped like a real entry point exists in scope.
+
+    Mirrors scanner.py's ENTRY_POINT_NAMES / "run_"-prefix convention (see
+    scanner._collect_entry_points / _rank_entry_points), which is what
+    scanner._compute_confidence() rewards with its own +0.1 bonus. Scoped to
+    `reachable` when reachability narrowing actually happened, otherwise
+    (no resolvable entry point) falls back to scanning every function node,
+    matching how the reachable-framework check above already treats an
+    empty `reachable` set as "everything counts".
+    """
+    for node, attrs in graph.nodes(data=True):
+        if attrs.get("kind") != "function":
+            continue
+        if reachable and node not in reachable:
+            continue
+        name = node.rsplit(".", 1)[-1]
+        if name in ENTRY_POINT_NAMES or name.startswith("run_"):
+            return True
+    return False
+
+
+def _has_raw_async_imports(graph: nx.DiGraph, reachable: set[str]) -> bool:
+    """True if the repo imports a raw async HTTP client (httpx/aiohttp).
+
+    This is the graph-based equivalent of scanner._has_raw_async(): once
+    every FRAMEWORK_IMPORTS prefix has come up empty, an import of a raw
+    async HTTP client is the same signal scanner.py uses to call a repo
+    "raw_async" instead of "unknown".
+    """
+    for node, attrs in graph.nodes(data=True):
+        kind = attrs.get("kind")
+        if kind not in ("module", None):
+            continue
+        if node not in RAW_ASYNC_IMPORTS and not any(
+            node.startswith(prefix + ".") for prefix in RAW_ASYNC_IMPORTS
+        ):
+            continue
+        if (not reachable) or (node in reachable):
+            return True
+    return False
