@@ -11,9 +11,7 @@ from superrobot.pipeline.graph.queries import callers_of, imports_of, reachable_
 def _build(tmp_path: Path) -> RepoGraph:
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("")
-    (tmp_path / "pkg" / "tools.py").write_text(
-        "def search(query: str) -> str:\n    return query\n"
-    )
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query: str) -> str:\n    return query\n")
     (tmp_path / "main.py").write_text(
         "from pkg.tools import search\n\n"
         "def run_agent():\n"

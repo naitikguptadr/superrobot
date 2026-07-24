@@ -29,9 +29,7 @@ def test_detects_reachable_framework_with_high_confidence(tmp_path: Path) -> Non
 
 def test_flags_unreachable_framework_import_separately(tmp_path: Path) -> None:
     (tmp_path / "dead_code.py").write_text(
-        "from crewai import Agent\n\n"
-        "def unused():\n"
-        "    return Agent\n"
+        "from crewai import Agent\n\ndef unused():\n    return Agent\n"
     )
     (tmp_path / "main.py").write_text(
         "from langgraph.graph import StateGraph\n\n"

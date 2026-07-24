@@ -15,9 +15,7 @@ from superrobot.pipeline.graph.gap_analysis import check_unreachable_frameworks
 
 def test_flags_unreachable_framework_as_warning(tmp_path: Path) -> None:
     (tmp_path / "dead_code.py").write_text(
-        "from crewai import Agent\n\n"
-        "def unused():\n"
-        "    return Agent\n"
+        "from crewai import Agent\n\ndef unused():\n    return Agent\n"
     )
     (tmp_path / "main.py").write_text(
         "from langgraph.graph import StateGraph\n\n"
