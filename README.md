@@ -1,18 +1,25 @@
 # SuperRobot
 
-DataRobot-native brownfield control plane. Migrate any existing Python agent to DataRobot, validate with Gap Analysis, deploy to Agent App or Workload API, and operate with receipts — all through the LLM Gateway.
+DataRobot-native brownfield control plane. Bring any existing Python agent to
+DataRobot — migrate, validate with Gap Analysis, deploy to Agent App or the
+Workload API, and operate with receipts — through a conversational shell wired
+to the DataRobot LLM Gateway.
 
-This tree is the **from-scratch rebuild** on `rebuild/pi-datarobot` (orphan branch, no shared history with `main`). The previous Textual-era codebase lives on `feat/brownfield-pipeline-and-tui`, tagged `archive/pre-pi-rebuild` as of the cutover PR.
+Just run `superrobot`. Talk to it naturally — "import this repo and deploy
+it" — and it drives the real pipeline (scan → transform → validate → deploy →
+receipts) as live tool calls, with a stage-rail widget tracking progress and a
+confirm gate before anything that touches production.
 
 ## Architecture
 
 | Layer | Path | Role |
 |---|---|---|
-| Engine CLI | `superrobot/` (Python) | Setup, doctor, transform, deploy, receipts |
-| Premium shell | `shell/` (Node / Pi customization) | Interactive branded UI, Gateway-wired Pi |
+| Engine CLI | `superrobot/` (Python) | Setup, doctor, scan/transform/validate/deploy, receipts |
+| Premium shell | `shell/` (Node / Pi customization) | Conversational UI, pipeline tools, Gateway-wired Pi |
+| DataRobot skills | `vendor/datarobot-agent-skills/` (submodule) | Official DataRobot agent skills, available out of the box |
 | Specs | `docs/specs/` | Spec-by-spec build contracts |
 
-## Quick start (Spec 01)
+## Quick start
 
 ```bash
 git submodule update --init --recursive   # pulls in vendor/datarobot-agent-skills
@@ -21,15 +28,42 @@ uv run superrobot setup --endpoint https://app.datarobot.com --token "$DATAROBOT
 uv run superrobot doctor
 ```
 
-Interactive shell (Spec 02 bootstrap):
+Build the interactive shell once:
 
 ```bash
 cd shell && npm install && npm run build
 ```
 
 Then just run `superrobot` (no subcommand) from anywhere in the repo — it launches
-the interactive shell directly. Existing subcommands (`scan`, `transform`, `deploy`,
-etc.) are unaffected.
+the interactive shell directly, like `opencode`/`claude` do. Existing subcommands
+(`scan`, `transform`, `deploy`, etc.) still work unchanged for scripting/CI.
+
+To make the global `superrobot` command track this checkout (recommended for
+local development):
+
+```bash
+uv tool install --editable . --force
+```
+
+## Deploying
+
+Two targets:
+
+- **Agent App** (`--target agent-app`) — the native DR deployment path via
+  `dr task run deploy`. Requires the target directory to already be a
+  DR-template-scaffolded project (a `Taskfile.yaml` + `.datarobot/` metadata,
+  the same structure `dr templates setup` produces) — `superrobot generate`
+  does not yet emit this scaffold, so this target isn't usable on a bare
+  generated package today.
+- **Workload API** (`--target workload`) — a direct REST deploy, no Taskfile
+  needed. Provide the image either way:
+  - `--image-uri <uri>` — bring your own image, already pushed to a registry
+    DataRobot can pull from.
+  - `--artifact-id <id>` — deploy from an artifact DataRobot already built for
+    you (e.g. via Code-to-Workload / server-side build — see the vendored
+    `datarobot-workload-api` skill). Required for C2W images: they live in
+    DataRobot's own internal registry and aren't schedulable under a freshly
+    created artifact.
 
 ## Specs
 
@@ -50,8 +84,14 @@ acceptance criteria maps to actual tests, and [docs/demo.md](docs/demo.md) /
 uv run superrobot scan tests/fixtures/langchain_agent --json
 uv run superrobot transform tests/fixtures/langchain_agent --json --skip-eval -o /tmp/sr-out
 uv run superrobot validate /tmp/sr-out --json
-uv run superrobot deploy /tmp/sr-out --target agent-app --json
+uv run superrobot deploy /tmp/sr-out --target workload --image-uri <built-image-uri> --json
 uv run superrobot receipt operations --json
+```
+
+Or, conversationally, from inside `superrobot`:
+
+```
+Import tests/fixtures/langchain_agent, transform it, validate it, and deploy it to Workload using artifact id <id>.
 ```
 
 ## Design rules
