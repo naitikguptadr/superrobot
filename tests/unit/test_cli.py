@@ -29,12 +29,32 @@ def test_doctor_json_not_ready(tmp_path: Path) -> None:
     assert "ready" in result.stdout
 
 
-def test_deploy_workload_requires_image_uri(tmp_path: Path) -> None:
+def test_deploy_workload_requires_image_uri_or_artifact_id(tmp_path: Path) -> None:
     result = runner.invoke(
         app, ["deploy", str(tmp_path), "--target", "workload", "--config-dir", str(tmp_path)]
     )
     assert result.exit_code == 2
-    assert "--image-uri is required" in result.stdout
+    assert "Exactly one of --image-uri or --artifact-id" in result.stdout
+
+
+def test_deploy_workload_rejects_both_image_uri_and_artifact_id(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "deploy",
+            str(tmp_path),
+            "--target",
+            "workload",
+            "--image-uri",
+            "registry.example.com/agent:1",
+            "--artifact-id",
+            "artifact-abc123",
+            "--config-dir",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "Exactly one of --image-uri or --artifact-id" in result.stdout
 
 
 def test_deploy_workload_blocked_without_entitlement(tmp_path: Path) -> None:

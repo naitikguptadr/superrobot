@@ -11,6 +11,7 @@ from superrobot.pipeline.workload_deployer import (
     WorkloadPreflightError,
     deploy_workload,
     load_manifest,
+    load_manifest_from_artifact,
     preflight_replace,
     preflight_secrets,
 )
@@ -69,6 +70,25 @@ def test_load_manifest_missing_file_raises(tmp_path: Path) -> None:
         load_manifest(tmp_path, "registry.example.com/agent:1")
 
 
+def test_load_manifest_from_artifact_replaces_inline_artifact_with_id(tmp_path: Path) -> None:
+    """Code-to-Workload (server-side build) images live in DataRobot's own
+    internal registry and are only schedulable when the workload references
+    the artifact that was actually built, not a fresh artifact created from
+    a copied imageUri (DR rejects that with a 'not permitted on this
+    cluster' error -- confirmed against a real staging environment)."""
+    _write_manifest(tmp_path)
+    manifest = load_manifest_from_artifact(tmp_path, "artifact-abc123")
+    assert manifest["artifactId"] == "artifact-abc123"
+    assert "artifact" not in manifest
+    assert manifest["name"] == "research-agent"
+    assert manifest["runtime"]["containerGroups"][0]["name"] == "default"  # type: ignore[index]
+
+
+def test_load_manifest_from_artifact_missing_file_raises(tmp_path: Path) -> None:
+    with pytest.raises(WorkloadPreflightError, match="No workload.yaml"):
+        load_manifest_from_artifact(tmp_path, "artifact-abc123")
+
+
 def test_preflight_replace_blocks_single_replica() -> None:
     with pytest.raises(WorkloadPreflightError, match="Refusing rolling replace"):
         preflight_replace({"runtime": {"containerGroups": [{"replicaCount": 1}]}})
@@ -103,6 +123,54 @@ def test_deploy_workload_creates_when_absent(tmp_path: Path) -> None:
     assert result.action == "created"
     assert result.workload_id == "w-new"
     assert fake.created is not None
+
+
+def test_deploy_workload_creates_from_existing_artifact_id(tmp_path: Path) -> None:
+    _write_manifest(tmp_path)
+    fake = _FakeClient(existing=None)
+    result = asyncio.run(
+        deploy_workload(
+            manifest_dir=tmp_path,
+            artifact_id="artifact-abc123",
+            endpoint="https://app.datarobot.com",
+            token="tok",
+            client=fake,  # type: ignore[arg-type]
+        )
+    )
+    assert result.success is True
+    assert result.action == "created"
+    assert fake.created is not None
+    assert fake.created["artifactId"] == "artifact-abc123"
+    assert "artifact" not in fake.created
+
+
+def test_deploy_workload_requires_exactly_one_of_image_uri_or_artifact_id(tmp_path: Path) -> None:
+    _write_manifest(tmp_path)
+    fake = _FakeClient(existing=None)
+
+    result = asyncio.run(
+        deploy_workload(
+            manifest_dir=tmp_path,
+            endpoint="https://app.datarobot.com",
+            token="tok",
+            client=fake,  # type: ignore[arg-type]
+        )
+    )
+    assert result.success is False
+    assert result.error_message is not None
+    assert "image_uri" in result.error_message or "artifact_id" in result.error_message
+
+    both_result = asyncio.run(
+        deploy_workload(
+            manifest_dir=tmp_path,
+            image_uri="registry.example.com/agent:1",
+            artifact_id="artifact-abc123",
+            endpoint="https://app.datarobot.com",
+            token="tok",
+            client=fake,  # type: ignore[arg-type]
+        )
+    )
+    assert both_result.success is False
 
 
 def test_deploy_workload_rolling_replace_when_present(tmp_path: Path) -> None:

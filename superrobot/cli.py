@@ -370,6 +370,19 @@ def deploy_cmd(
     image_uri: Annotated[
         str | None, typer.Option("--image-uri", help="Built container image (workload target)")
     ] = None,
+    artifact_id: Annotated[
+        str | None,
+        typer.Option(
+            "--artifact-id",
+            help=(
+                "Deploy from an already-built Workload API artifact instead of a fresh "
+                "image URI (required for Code-to-Workload/server-side builds -- those "
+                "images live in DataRobot's internal registry and aren't schedulable "
+                "under a freshly-created artifact). Workload target only; exactly one "
+                "of --image-uri/--artifact-id is required."
+            ),
+        ),
+    ] = None,
     secret: Annotated[
         list[str] | None,
         typer.Option("--secret", help="KEY=credential:<id> (workload target, repeatable)"),
@@ -403,6 +416,7 @@ def deploy_cmd(
             _deploy_workload(
                 path,
                 image_uri=image_uri,
+                artifact_id=artifact_id,
                 secrets=secret,
                 waive=waive,
                 config_dir=config_dir,
@@ -593,6 +607,7 @@ async def _deploy_workload(
     path: Path,
     *,
     image_uri: str | None,
+    artifact_id: str | None = None,
     secrets: list[str] | None,
     waive: bool,
     config_dir: Path | None,
@@ -601,8 +616,10 @@ async def _deploy_workload(
 ) -> int:
     from superrobot.pipeline.workload_deployer import deploy_workload
 
-    if not image_uri:
-        console.print("[red]--image-uri is required for --target workload[/]")
+    if bool(image_uri) == bool(artifact_id):
+        console.print(
+            "[red]Exactly one of --image-uri or --artifact-id is required for --target workload[/]"
+        )
         return 2
 
     secret_map: dict[str, str] = {}
@@ -639,6 +656,7 @@ async def _deploy_workload(
     result = await deploy_workload(
         manifest_dir=str(path),
         image_uri=image_uri,
+        artifact_id=artifact_id,
         endpoint=endpoint,
         token=token,
         secrets=secret_map,
