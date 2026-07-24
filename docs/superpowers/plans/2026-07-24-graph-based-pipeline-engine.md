@@ -49,9 +49,11 @@ Expected: prints three version strings, no `ModuleNotFoundError`.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add pyproject.toml uv.lock
+git add pyproject.toml
 git commit -m "build: add jedi, libcst, networkx dependencies for graph-based pipeline engine"
 ```
+
+(`uv.lock` is gitignored in this repo — same convention as `shell/package-lock.json` — do not force-add it.)
 
 ---
 
@@ -445,13 +447,21 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
                     continue
 
                 for target_def in inferred:
-                    if not target_def.module_path:
+                    if not target_def.module_path or not target_def.full_name:
                         continue
                     target_path = Path(target_def.module_path)
                     if not target_path.is_relative_to(repo_root):
                         continue
-                    target_mod = module_dotted_name(target_path, repo_root)
-                    callee_id = f"{target_mod}.{target_def.name}"
+                    # jedi's full_name is already fully qualified through
+                    # enclosing classes (verified: a method f.search() on
+                    # class Foo infers full_name="pkg.tools.Foo.search"),
+                    # which matches this graph's node-id scheme exactly
+                    # (module_dotted_name + nested-qualified def name from
+                    # Task 3's parent-tracking fix). Do NOT reconstruct
+                    # from target_def.name alone -- that's only the bare
+                    # method name and would silently fail to match nested
+                    # node ids for class methods.
+                    callee_id = target_def.full_name
                     if callee_id in graph:
                         graph.add_edge(caller_id, callee_id, kind="calls")
 
