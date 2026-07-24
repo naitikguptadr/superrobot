@@ -76,14 +76,25 @@ def should_launch_shell(argv: list[str]) -> bool:
     """True when argv doesn't look like a real subcommand invocation, so
     `superrobot` (bare, or with shell-only flags like --print) should launch
     the interactive shell instead of falling through to Typer's own parsing
-    (which would otherwise error on an unrecognized command/option)."""
+    (which would otherwise error on an unrecognized command/option).
+
+    Tradeoff: this only inspects argv[0], so a free-text prompt that happens
+    to start with a subcommand word (e.g. "generate a poem about pandas")
+    dispatches to Typer, not the shell, and Typer will report a usage error
+    for that subcommand rather than treating it as a prompt. Accepted as a
+    known limitation rather than a heuristic that guesses at intent."""
     if not argv:
         return True
     return argv[0] not in _KNOWN_SUBCOMMANDS and argv[0] not in _KNOWN_GLOBAL_FLAGS
 
 
 def launch_shell(argv: list[str]) -> None:
-    """Replace the current process with the built Pi shell, passing argv through."""
+    """Replace the current process with the built Pi shell, passing argv through.
+
+    Called from main_entry(), before Typer/Click ever runs -- typer.Exit is
+    only translated to a clean process exit inside Click's own dispatch, so
+    failures here must raise SystemExit directly instead.
+    """
     shell_entry = find_shell_entry()
     if shell_entry is None:
         console.print(
@@ -92,14 +103,18 @@ def launch_shell(argv: list[str]) -> None:
             "or set [cyan]SUPERROBOT_SHELL_DIR[/] to a directory containing dist/cli.js.\n\n"
             "Run [cyan]superrobot --help[/] to see available subcommands instead."
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     node = shutil.which("node")
     if node is None:
         console.print("[red]node not found on PATH[/] — required to run the interactive shell.")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
-    os.execvp(node, [node, str(shell_entry), *argv])
+    try:
+        os.execvp(node, [node, str(shell_entry), *argv])
+    except OSError as exc:
+        console.print(f"[red]Failed to launch the interactive shell:[/] {exc}")
+        raise SystemExit(1) from exc
 
 
 def main_entry() -> None:
