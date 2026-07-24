@@ -318,3 +318,60 @@ test("superrobot_transform arms the rail spinner even without a prior scan in th
     await shutdown!({ type: "session_shutdown", reason: "quit" });
   }
 });
+
+test("superrobot_receipts(action=operations) as the session's first pipeline call still arms the rail spinner for later calls", async () => {
+  const { pi, tools, handlers } = fakePi((args) => {
+    if (args[0] === "transform") {
+      return { stdout: JSON.stringify({ files: ["a.py"] }), stderr: "", code: 0 };
+    }
+    return scanExecOk()(args);
+  });
+  const fakeWebController: WebController = {
+    start: async () => ({ port: 4321 }),
+    update: () => {},
+    stop: async () => {},
+  };
+  registerSuperRobotTools(pi, () => fakeWebController);
+
+  const setWidgetCalls: Array<[string, unknown]> = [];
+  const ctx = {
+    ui: {
+      setWidget: (key: string, value: unknown) => {
+        setWidgetCalls.push([key, value]);
+      },
+      confirm: async () => true,
+      notify: () => {},
+    },
+  } as unknown as ExtensionContext;
+
+  const receipts = tools.get("superrobot_receipts");
+  const transform = tools.get("superrobot_transform");
+  const shutdown = handlers.get("session_shutdown");
+  assert.ok(receipts && transform && shutdown, "superrobot_receipts, superrobot_transform, and session_shutdown should be registered");
+
+  try {
+    // superrobot_receipts(action=operations) is the very first pipeline tool
+    // call of the session -- it creates the `rail` singleton (via
+    // railFor(ctx)) but, unlike show/replace, doesn't represent a pipeline
+    // stage transition. If it fails to also call rc.start(), the rail's
+    // spinner interval is never armed, and every later call (transform here)
+    // sees isNewRail=false and only ever calls rc.update(), so the spinner
+    // stays frozen for the rest of the session.
+    await receipts!("id1", { action: "operations" }, undefined, undefined, ctx);
+    await transform!("id2", { path: "tests/fixtures/langchain_agent", outputDir: "out" }, undefined, undefined, ctx);
+
+    const callsRightAfterExecute = setWidgetCalls.length;
+    // RailController.start() (unlike .update()) arms a ~90ms setInterval that
+    // keeps redrawing so the spinner glyph animates. Give it a couple of
+    // ticks: if only .update() was ever called (the bug), no interval is
+    // armed and setWidget is never called again on its own.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.ok(
+      setWidgetCalls.length > callsRightAfterExecute,
+      "the rail's spinner interval should have ticked after receipts(operations) + transform, proving rc.start() ran somewhere in that sequence",
+    );
+  } finally {
+    // Stop the rail's interval so it doesn't keep the test process alive.
+    await shutdown!({ type: "session_shutdown", reason: "quit" });
+  }
+});

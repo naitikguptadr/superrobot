@@ -339,16 +339,26 @@ export function registerSuperRobotTools(
       if (!result.ok) {
         if (params.action === "show" || params.action === "replace") {
           pipeline = withStageFailed(pipeline, "receipt", result.message);
-          if (isNewRail) rc.start(pipeline); else rc.update(pipeline);
-          safeWebUpdate(wc, pipeline);
         }
+        // Arm/refresh the rail and web companion on every action, not just
+        // show/replace: railFor(ctx) above unconditionally creates `rail`
+        // (setting isNewRail) as a side effect, so every action must call
+        // rc.start()/rc.update() here or a rail created by an
+        // operations/diagnose call would never get its spinner interval
+        // armed -- and every later call in the session would then see
+        // isNewRail=false and keep calling rc.update() instead, leaving the
+        // spinner frozen for the rest of the session.
+        if (isNewRail) rc.start(pipeline); else rc.update(pipeline);
+        safeWebUpdate(wc, pipeline);
         throw new Error(`superrobot receipt ${params.action} failed: ${result.message}`);
       }
       if (params.action === "show" || params.action === "replace") {
         pipeline = withStageDone(pipeline, "receipt", params.action);
-        if (isNewRail) rc.start(pipeline); else rc.update(pipeline);
-        safeWebUpdate(wc, pipeline);
       }
+      // Same reasoning as the failure branch above: arm/refresh the rail for
+      // every action so operations/diagnose can't leave it un-started.
+      if (isNewRail) rc.start(pipeline); else rc.update(pipeline);
+      safeWebUpdate(wc, pipeline);
       return { content: [{ type: "text", text: JSON.stringify(result.data) }], details: result.data as object };
     },
   });
