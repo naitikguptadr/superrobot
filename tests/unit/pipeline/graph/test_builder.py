@@ -51,3 +51,36 @@ def test_save_and_load_round_trips_graph(tmp_path: Path) -> None:
     assert set(loaded.graph.nodes) == {"main", "main.run"}
     assert loaded.graph.nodes["main.run"]["kind"] == "function"
     assert loaded.graph.has_edge("main", "main.run")
+
+
+def test_build_repo_graph_structure_pass(tmp_path: Path) -> None:
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text(
+        "def search(query: str) -> str:\n    return query\n"
+    )
+    (tmp_path / "main.py").write_text(
+        "from pkg.tools import search\n\n"
+        "def run_agent():\n"
+        "    return search('hello')\n\n"
+        "if __name__ == '__main__':\n"
+        "    run_agent()\n"
+    )
+
+    repo_graph = build_repo_graph(tmp_path)
+    graph = repo_graph.graph
+
+    assert graph.nodes["main"]["kind"] == "module"
+    assert graph.nodes["pkg.tools"]["kind"] == "module"
+    assert graph.nodes["main.run_agent"]["kind"] == "function"
+    assert graph.nodes["main.run_agent"]["line"] == 3
+    assert graph.nodes["pkg.tools.search"]["kind"] == "function"
+
+    assert graph.has_edge("main", "main.run_agent")
+    assert graph.get_edge_data("main", "main.run_agent")["kind"] == "defines"
+    assert graph.has_edge("pkg.tools", "pkg.tools.search")
+
+    assert graph.has_edge("main", "pkg.tools")
+    assert graph.get_edge_data("main", "pkg.tools")["kind"] == "imports"

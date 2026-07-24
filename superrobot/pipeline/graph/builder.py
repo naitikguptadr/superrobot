@@ -11,6 +11,7 @@ resolving call targets for the graph's "calls" edges.
 
 from __future__ import annotations
 
+import ast
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,3 +61,40 @@ class RepoGraph:
         data = json.loads(path.read_text())
         graph = nx.node_link_graph(data, edges="edges")
         return cls(graph=graph, repo_root=repo_root)
+
+
+def build_repo_graph(repo_root: Path) -> RepoGraph:
+    """Build a RepoGraph for the Python repo at repo_root.
+
+    Two passes: first ast-based structure (modules, function/class
+    definitions, defines/imports edges), then a separate call-resolution
+    pass (added in a later task) adds "calls" edges via jedi.
+    """
+    repo_root = Path(repo_root)
+    graph = nx.DiGraph()
+
+    for py_file in iter_python_files(repo_root):
+        try:
+            source = py_file.read_text()
+            tree = ast.parse(source, filename=str(py_file))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+
+        mod_name = module_dotted_name(py_file, repo_root)
+        graph.add_node(mod_name, kind="module", path=str(py_file))
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                qual_id = f"{mod_name}.{node.name}"
+                node_kind = "class" if isinstance(node, ast.ClassDef) else "function"
+                graph.add_node(qual_id, kind=node_kind, path=str(py_file), line=node.lineno)
+                graph.add_edge(mod_name, qual_id, kind="defines")
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                graph.add_edge(mod_name, node.module, kind="imports")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    graph.add_edge(mod_name, alias.name, kind="imports")
+
+    return RepoGraph(graph=graph, repo_root=repo_root)
