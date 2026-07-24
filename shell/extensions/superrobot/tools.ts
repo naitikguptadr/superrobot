@@ -48,9 +48,18 @@ export function registerSuperRobotTools(
   let web: WebController | undefined;
   let hasNotifiedWebUrl = false;
 
-  function railFor(ctx: ExtensionContext): RailController {
+  // `isNewRail` tells callers whether `rail` had to be created by this very
+  // call (i.e. this is the first pipeline tool call of the session). Only
+  // superrobot_scan used to ever call rc.start() -- if a fresh session's
+  // first pipeline tool call was transform/validate/deploy/receipts instead,
+  // rc.start() (which arms the rail's ~90ms spinner-animation interval) was
+  // never called and the spinner glyph stayed visually frozen. Every handler
+  // below uses `isNewRail` to call rc.start() instead of rc.update() exactly
+  // once, the first time it sees a rail it just created.
+  function railFor(ctx: ExtensionContext): { rc: RailController; isNewRail: boolean } {
+    const isNewRail = !rail;
     if (!rail) rail = createRailController(ctx);
-    return rail;
+    return { rc: rail, isNewRail };
   }
 
   // The companion web UI is strictly optional and additive: any failure here
@@ -115,11 +124,11 @@ export function registerSuperRobotTools(
       path: Type.String({ description: "Local path to the agent repo" }),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const rc = railFor(ctx);
+      const { rc, isNewRail } = railFor(ctx);
       const wc = webFor();
       pipeline = freshPipeline();
       pipeline = withStageActive(pipeline, "scan", params.path);
-      rc.start(pipeline);
+      if (isNewRail) rc.start(pipeline); else rc.update(pipeline);
       await safeWebStart(wc, pipeline, ctx);
 
       const result = await cli.scan(params.path);
@@ -154,10 +163,10 @@ export function registerSuperRobotTools(
       skipEval: Type.Optional(Type.Boolean({ description: "Skip the 5-shot eval stage" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const rc = railFor(ctx);
+      const { rc, isNewRail } = railFor(ctx);
       const wc = webFor();
       pipeline = withStageActive(pipeline, "transform", params.outputDir);
-      rc.update(pipeline);
+      if (isNewRail) rc.start(pipeline); else rc.update(pipeline);
       safeWebUpdate(wc, pipeline);
 
       const result = await cli.transform(params.path, {
@@ -195,10 +204,10 @@ export function registerSuperRobotTools(
       source: Type.Optional(Type.String({ description: "Original repo path, enables the pyproject-removal check" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const rc = railFor(ctx);
+      const { rc, isNewRail } = railFor(ctx);
       const wc = webFor();
       pipeline = withStageActive(pipeline, "validate", params.dir);
-      rc.update(pipeline);
+      if (isNewRail) rc.start(pipeline); else rc.update(pipeline);
       safeWebUpdate(wc, pipeline);
 
       const result = await cli.validate(params.dir, params.source);
@@ -257,10 +266,10 @@ export function registerSuperRobotTools(
         return { content: [{ type: "text", text: "Deploy cancelled by user; no receipt was written." }], details: { cancelled: true } };
       }
 
-      const rc = railFor(ctx);
+      const { rc, isNewRail } = railFor(ctx);
       const wc = webFor();
       pipeline = withStageActive(pipeline, "deploy", params.target);
-      rc.update(pipeline);
+      if (isNewRail) rc.start(pipeline); else rc.update(pipeline);
       safeWebUpdate(wc, pipeline);
 
       const result = await cli.deploy(params.dir, params.target, {
@@ -306,7 +315,7 @@ export function registerSuperRobotTools(
       target: Type.Optional(Type.String({ description: "Filter by target for action=operations" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const rc = railFor(ctx);
+      const { rc, isNewRail } = railFor(ctx);
       const wc = webFor();
       let result: CliResult<unknown>;
       switch (params.action) {
@@ -330,14 +339,14 @@ export function registerSuperRobotTools(
       if (!result.ok) {
         if (params.action === "show" || params.action === "replace") {
           pipeline = withStageFailed(pipeline, "receipt", result.message);
-          rc.update(pipeline);
+          if (isNewRail) rc.start(pipeline); else rc.update(pipeline);
           safeWebUpdate(wc, pipeline);
         }
         throw new Error(`superrobot receipt ${params.action} failed: ${result.message}`);
       }
       if (params.action === "show" || params.action === "replace") {
         pipeline = withStageDone(pipeline, "receipt", params.action);
-        rc.update(pipeline);
+        if (isNewRail) rc.start(pipeline); else rc.update(pipeline);
         safeWebUpdate(wc, pipeline);
       }
       return { content: [{ type: "text", text: JSON.stringify(result.data) }], details: result.data as object };
@@ -378,9 +387,16 @@ export function registerSuperRobotTools(
   // to do.
   pi.on("session_shutdown", async () => {
     rail?.stop();
-    if (web) await web.stop();
+    if (web) {
+      try {
+        await web.stop();
+      } catch (err) {
+        console.error("[superrobot] web companion failed to stop:", err);
+      }
+    }
     rail = undefined;
     web = undefined;
     hasNotifiedWebUrl = false;
+    pipeline = freshPipeline();
   });
 }

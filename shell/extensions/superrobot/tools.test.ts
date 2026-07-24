@@ -209,3 +209,112 @@ test("session_shutdown stops both the rail and web controllers once they've been
   const lastSetWidgetCall = setWidgetCalls.at(-1);
   assert.equal(lastSetWidgetCall?.[1], undefined, "RailController.stop() should clear the widget");
 });
+
+test("session_shutdown does not throw when the web companion's stop() rejects", async () => {
+  const { pi, tools, handlers } = fakePi(scanExecOk());
+  const fakeWebController: WebController = {
+    start: async () => ({ port: 4321 }),
+    update: () => {},
+    stop: async () => {
+      throw new Error("boom: stop() failed");
+    },
+  };
+  registerSuperRobotTools(pi, () => fakeWebController);
+
+  const scan = tools.get("superrobot_scan");
+  const shutdown = handlers.get("session_shutdown");
+  assert.ok(scan && shutdown, "superrobot_scan and session_shutdown should be registered");
+
+  await scan!("id1", { path: "tests/fixtures/langchain_agent" }, undefined, undefined, fakeCtx());
+  await assert.doesNotReject(() => Promise.resolve(shutdown!({ type: "session_shutdown", reason: "quit" })));
+});
+
+test("session_shutdown resets pipeline state so a later session doesn't inherit stale stage statuses", async () => {
+  const { pi, tools, handlers } = fakePi((args) => {
+    if (args[0] === "transform") {
+      return { stdout: JSON.stringify({ files: ["a.py"] }), stderr: "", code: 0 };
+    }
+    return scanExecOk()(args);
+  });
+  const updateCalls: PipelineState[] = [];
+  const fakeWebController: WebController = {
+    start: async () => ({ port: 4321 }),
+    update: (state: PipelineState) => {
+      updateCalls.push(state);
+    },
+    stop: async () => {},
+  };
+  registerSuperRobotTools(pi, () => fakeWebController);
+
+  const scan = tools.get("superrobot_scan");
+  const transform = tools.get("superrobot_transform");
+  const shutdown = handlers.get("session_shutdown");
+  assert.ok(scan && transform && shutdown, "scan, transform, and session_shutdown should all be registered");
+
+  // Finish a scan (marks the "scan" stage "done"), then end the session.
+  await scan!("id1", { path: "tests/fixtures/langchain_agent" }, undefined, undefined, fakeCtx());
+  await shutdown!({ type: "session_shutdown", reason: "quit" });
+
+  // A brand new session's first pipeline call is transform, not scan -- if
+  // `pipeline` wasn't reset by session_shutdown, the stale "scan: done" from
+  // the previous session would still be sitting there.
+  updateCalls.length = 0;
+  await transform!("id2", { path: "tests/fixtures/langchain_agent", outputDir: "out" }, undefined, undefined, fakeCtx());
+
+  const scanStage = updateCalls[0]?.find((s) => s.id === "scan");
+  assert.equal(
+    scanStage?.status,
+    "pending",
+    "pipeline should have been reset to fresh on session_shutdown, not carry over the prior session's 'done' scan stage",
+  );
+});
+
+test("superrobot_transform arms the rail spinner even without a prior scan in the same session", async () => {
+  const { pi, tools, handlers } = fakePi((args) => {
+    if (args[0] === "transform") {
+      return { stdout: JSON.stringify({ files: ["a.py"] }), stderr: "", code: 0 };
+    }
+    return scanExecOk()(args);
+  });
+  const fakeWebController: WebController = {
+    start: async () => ({ port: 4321 }),
+    update: () => {},
+    stop: async () => {},
+  };
+  registerSuperRobotTools(pi, () => fakeWebController);
+
+  const setWidgetCalls: Array<[string, unknown]> = [];
+  const ctx = {
+    ui: {
+      setWidget: (key: string, value: unknown) => {
+        setWidgetCalls.push([key, value]);
+      },
+      confirm: async () => true,
+      notify: () => {},
+    },
+  } as unknown as ExtensionContext;
+
+  const transform = tools.get("superrobot_transform");
+  const shutdown = handlers.get("session_shutdown");
+  assert.ok(transform && shutdown, "superrobot_transform and session_shutdown should be registered");
+
+  try {
+    // No superrobot_scan call anywhere before this -- transform is the very
+    // first pipeline tool call in this session.
+    await transform!("id1", { path: "tests/fixtures/langchain_agent", outputDir: "out" }, undefined, undefined, ctx);
+
+    const callsRightAfterExecute = setWidgetCalls.length;
+    // RailController.start() (unlike .update()) arms a ~90ms setInterval that
+    // keeps redrawing so the spinner glyph animates. Give it a couple of
+    // ticks: if only .update() was ever called (the bug), no interval is
+    // armed and setWidget is never called again on its own.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.ok(
+      setWidgetCalls.length > callsRightAfterExecute,
+      "the rail's spinner interval should have ticked after superrobot_transform, proving rc.start() (not just rc.update()) ran",
+    );
+  } finally {
+    // Stop the rail's interval so it doesn't keep the test process alive.
+    await shutdown!({ type: "session_shutdown", reason: "quit" });
+  }
+});
