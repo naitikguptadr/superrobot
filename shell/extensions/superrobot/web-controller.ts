@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
-import { join, extname, dirname } from "node:path";
+import { join, extname, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { PipelineState } from "./pipeline-state.ts";
@@ -66,8 +66,24 @@ export function createWebController(options: WebControllerOptions = {}): WebCont
 
       const newServer = createServer((req, res) => {
         void (async () => {
-          const urlPath = req.url === "/" ? "/index.html" : (req.url ?? "/index.html");
-          const filePath = join(COMPANION_DIST_DIR, urlPath);
+          // Parse with a base so req.url's query/hash (e.g. "/?t=123") don't
+          // leak into the "/" check or the file path -- .pathname is
+          // stripped of both.
+          const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+          const urlPath = pathname === "/" ? "/index.html" : pathname;
+          const filePath = resolve(join(COMPANION_DIST_DIR, urlPath));
+          // Sandbox check: a request like GET /../../package.json would
+          // otherwise resolve outside COMPANION_DIST_DIR and let the process
+          // read (and serve) arbitrary files on disk. Require the resolved
+          // path to still be COMPANION_DIST_DIR itself or a descendant of it
+          // -- comparing against `${dir}${sep}` (rather than a bare prefix
+          // check) so a sibling directory that merely shares the prefix
+          // (e.g. "companion/dist-evil") isn't mistaken for a descendant.
+          if (filePath !== COMPANION_DIST_DIR && !filePath.startsWith(COMPANION_DIST_DIR + sep)) {
+            res.writeHead(403);
+            res.end("Forbidden");
+            return;
+          }
           try {
             const body = await readFile(filePath);
             const contentType = CONTENT_TYPES[extname(filePath)] ?? "application/octet-stream";
@@ -80,7 +96,18 @@ export function createWebController(options: WebControllerOptions = {}): WebCont
         })();
       });
 
+      // Assign to the outer closure vars immediately -- before awaiting the
+      // listen-or-error resolution below -- so that a stop() call racing an
+      // in-flight start() (e.g. session_shutdown firing while the bind is
+      // still pending) can always find and close these, rather than seeing
+      // `undefined` and silently no-op'ing while this half-bound server goes
+      // on to bind successfully with no reachable reference left to close it
+      // (a permanent leak). http.Server#close()/WebSocketServer#close() are
+      // safe to call on a server that hasn't finished binding yet -- they
+      // just abort (or clean up after) the pending listen.
       const newWss = new WebSocketServer({ server: newServer, path: "/ws" });
+      server = newServer;
+      wss = newWss;
       newWss.on("connection", (ws) => {
         clients.add(ws);
         // Push the current state immediately so a client that connects
@@ -89,6 +116,11 @@ export function createWebController(options: WebControllerOptions = {}): WebCont
         // the next update() call happens to fire.
         ws.send(JSON.stringify(latestState));
         ws.on("close", () => clients.delete(ws));
+        // Without this, a malformed/protocol-violating frame from the client
+        // emits 'error' on `ws` with zero listeners -- which Node's
+        // EventEmitter treats as an uncaught exception, crashing the entire
+        // host process. Terminate just this connection instead.
+        ws.on("error", () => ws.terminate());
       });
 
       const boundPort = await new Promise<number>((resolve) => {
@@ -114,21 +146,26 @@ export function createWebController(options: WebControllerOptions = {}): WebCont
           resolve(typeof address === "object" && address ? address.port : 0);
         });
         try {
-          newServer.listen(options.port ?? 0);
+          // Bind to the IPv4 loopback address explicitly. Without a host,
+          // Node binds to the unspecified address ('::' / all interfaces),
+          // which would make this local-dev-only companion UI reachable from
+          // the entire LAN.
+          newServer.listen(options.port ?? 0, "127.0.0.1");
         } catch (err) {
           console.error("[superrobot] web companion failed to start:", err);
           resolve(0);
         }
       });
 
-      if (boundPort > 0) {
-        server = newServer;
-        wss = newWss;
-      } else {
-        // Bind failed -- make sure we don't leak the half-started server/wss,
-        // and leave `server`/`wss` undefined so stop() is a no-op.
+      if (boundPort === 0) {
+        // Bind failed outright, or a concurrent stop() aborted it mid-flight
+        // -- make sure we don't leak the half-started server/wss, and only
+        // clear the outer refs if they still point at *this* attempt (a
+        // concurrent stop() may already have closed and/or cleared them).
         newWss.close();
         newServer.removeAllListeners();
+        if (server === newServer) server = undefined;
+        if (wss === newWss) wss = undefined;
       }
 
       return { port: boundPort };
