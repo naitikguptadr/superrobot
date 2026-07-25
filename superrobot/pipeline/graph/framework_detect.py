@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import networkx as nx  # type: ignore[import-untyped]
 
 from superrobot.pipeline.graph.builder import RepoGraph
+from superrobot.pipeline.graph.queries import imports_of, reachable_from
 from superrobot.pipeline.scanner import ENTRY_POINT_NAMES, FRAMEWORK_IMPORTS
 
 # scanner.py's raw-async fallback: no known agent framework import, but the
@@ -30,6 +31,26 @@ RAW_ASYNC_IMPORTS = frozenset({"httpx", "aiohttp"})
 # fixtures have neither) and reachability falls back to "everything counts".
 _ENTRY_SIGNAL_BONUS = 0.1
 
+# Deterministic tie-break order for simultaneously reachable/unreachable
+# frameworks: FRAMEWORK_IMPORTS' own declaration order, EXCEPT "langchain"
+# itself, which is pushed to the very end (lowest priority). "langchain"
+# is the generic base layer that more specific frameworks are routinely
+# built directly on top of and import too -- a real langgraph app importing
+# langchain_core for its `@tool` decorator (see
+# tests/fixtures/langgraph_research_agent) is the common case, not a rare
+# one. scanner.py already treats "langchain" as the weaker signal of the
+# two: it gives it a lower base confidence (0.75 vs. langgraph's 0.9) and
+# has an explicit override letting "langgraph" win over "langchain"
+# whenever has_state_graph is true. Naively picking whichever framework
+# FRAMEWORK_IMPORTS happens to declare first (i.e. "langchain", since its
+# prefixes are listed before "langgraph"'s) would make every such repo
+# misreport as "langchain" instead of the more specific "langgraph" --
+# this ordering keeps the tie-break deterministic while still matching
+# scanner.py's real-world behavior.
+_FRAMEWORK_PRIORITY: tuple[str, ...] = tuple(
+    framework for framework in dict.fromkeys(FRAMEWORK_IMPORTS.values()) if framework != "langchain"
+) + ("langchain",)
+
 
 @dataclass
 class FrameworkDetection:
@@ -46,7 +67,10 @@ def detect_framework(repo_graph: RepoGraph, entry_point: str | None) -> Framewor
     if entry_point is not None and entry_point in graph:
         # Functions/classes actually reachable from the entry point via real
         # `calls` edges (already correct: this is a genuine call-graph walk).
-        reachable_functions = nx.descendants(graph, entry_point) | {entry_point}
+        # Delegate to queries.reachable_from() rather than reimplementing
+        # nx.descendants() inline -- centralizing this logic in queries.py
+        # is the entire point of that module.
+        reachable_functions = reachable_from(repo_graph, entry_point) | {entry_point}
         reachable |= reachable_functions
 
         for func_node in reachable_functions:
@@ -63,15 +87,16 @@ def detect_framework(repo_graph: RepoGraph, entry_point: str | None) -> Framewor
                 # call path, so pull in that module's `imports` targets too
                 # -- except edges tagged type_checking_only=True, which
                 # never execute (an `if TYPE_CHECKING:`-guarded import) and
-                # so must never make a module look reachable/in-use.
-                for _, imported, imports_attrs in graph.out_edges(module_node, data=True):
-                    if imports_attrs.get("kind") == "imports" and not imports_attrs.get(
-                        "type_checking_only", False
-                    ):
-                        reachable.add(imported)
+                # so must never make a module look reachable/in-use. Delegate
+                # to queries.imports_of() (with its type-checking-only
+                # exclusion flag) rather than reimplementing the edge filter
+                # inline.
+                reachable.update(
+                    imports_of(repo_graph, module_node, exclude_type_checking_only=True)
+                )
 
-    reachable_frameworks: dict[str, str] = {}
-    unreachable_frameworks: dict[str, str] = {}
+    reachable_frameworks: set[str] = set()
+    unreachable_frameworks: set[str] = set()
     unreachable_warnings: list[str] = []
 
     for node, attrs in graph.nodes(data=True):
@@ -95,9 +120,9 @@ def detect_framework(repo_graph: RepoGraph, entry_point: str | None) -> Framewor
                 continue
             is_reachable = (not reachable) or (node in reachable)
             if is_reachable:
-                reachable_frameworks.setdefault(framework, node)
+                reachable_frameworks.add(framework)
             else:
-                unreachable_frameworks.setdefault(framework, node)
+                unreachable_frameworks.add(framework)
                 unreachable_warnings.append(
                     f"unreachable framework import found: {framework} ({node}) -- "
                     "confirm this isn't leftover from an abandoned migration"
@@ -106,7 +131,7 @@ def detect_framework(repo_graph: RepoGraph, entry_point: str | None) -> Framewor
     entry_bonus = _ENTRY_SIGNAL_BONUS if _has_entry_point_signal(graph, reachable) else 0.0
 
     if reachable_frameworks:
-        framework = next(iter(reachable_frameworks))
+        framework = _pick_deterministic_winner(reachable_frameworks)
         return FrameworkDetection(
             framework=framework,
             confidence=min(1.0, 0.9 + entry_bonus),
@@ -114,7 +139,7 @@ def detect_framework(repo_graph: RepoGraph, entry_point: str | None) -> Framewor
         )
 
     if unreachable_frameworks:
-        framework = next(iter(unreachable_frameworks))
+        framework = _pick_deterministic_winner(unreachable_frameworks)
         return FrameworkDetection(
             framework=framework,
             confidence=min(1.0, 0.4 + entry_bonus),
@@ -128,7 +153,29 @@ def detect_framework(repo_graph: RepoGraph, entry_point: str | None) -> Framewor
             unreachable_warnings=unreachable_warnings,
         )
 
-    return FrameworkDetection(framework="unknown", confidence=0.2)
+    return FrameworkDetection(framework="unknown", confidence=min(1.0, 0.2 + entry_bonus))
+
+
+def _pick_deterministic_winner(frameworks: set[str]) -> str:
+    """Pick a single framework out of a set of simultaneously
+    reachable/unreachable candidates, deterministically.
+
+    `frameworks` is built from `graph.nodes(data=True)` iteration, whose
+    order is driven by incidental graph-node insertion order (itself driven
+    by builder.iter_python_files' filesystem enumeration order) -- not
+    something callers should ever depend on. Instead, break the tie using
+    the fixed `_FRAMEWORK_PRIORITY` order (derived from FRAMEWORK_IMPORTS'
+    own declaration order -- see its comment for why "langchain" is
+    special-cased to the end): the first framework name in that order that
+    appears in `frameworks` wins, so the same repo always reports the same
+    framework no matter which module happens to be processed first.
+    """
+    for framework in _FRAMEWORK_PRIORITY:
+        if framework in frameworks:
+            return framework
+    # Unreachable in practice: `frameworks` is only ever populated with
+    # values drawn directly from FRAMEWORK_IMPORTS itself.
+    return next(iter(frameworks))
 
 
 def _is_type_checking_only_import(graph: nx.DiGraph, node: str) -> bool:

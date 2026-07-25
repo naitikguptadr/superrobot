@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from superrobot.pipeline.graph.builder import build_repo_graph
 from superrobot.pipeline.graph.entry_points import resolve_entry_point
 from superrobot.pipeline.graph.framework_detect import detect_framework
@@ -144,3 +146,63 @@ def test_returns_unknown_with_low_confidence_when_no_framework_found(tmp_path: P
 
     assert result.framework == "unknown"
     assert result.confidence <= 0.3
+
+
+def test_unknown_fallback_confidence_includes_entry_bonus(tmp_path: Path) -> None:
+    """The module's own docstring/comments state the entry-signal bonus
+    exists specifically so confidence here is never lower than scanner.py's
+    for the same repo. scanner._compute_confidence() unconditionally adds
+    +0.1 to the "unknown" base whenever any entry-point-shaped function
+    exists -- regardless of whether a framework was found. Reproduce a repo
+    with a function shaped like a real entry point (name "run_agent", in
+    ENTRY_POINT_NAMES), no framework import at all, and no resolvable
+    __main__ guard/console-script (so entry_point is None and the
+    "unknown" fallback path is hit). The graph-based path must apply the
+    exact same bonus as every other return path in detect_framework(),
+    landing on 0.3, not the previously-hardcoded 0.2.
+    """
+    (tmp_path / "main.py").write_text("def run_agent():\n    return 1\n")
+    repo_graph = build_repo_graph(tmp_path)
+    entry = resolve_entry_point(repo_graph)
+    assert entry is None
+
+    result = detect_framework(repo_graph, entry)
+
+    assert result.framework == "unknown"
+    assert result.confidence == pytest.approx(0.3)
+
+
+def test_reachable_framework_tie_break_is_deterministic(tmp_path: Path) -> None:
+    """When two frameworks are simultaneously reachable from the entry
+    point, the winner must not depend on incidental graph-node insertion
+    order (itself driven by iter_python_files' rglob filesystem
+    enumeration order). This repo is built so that, absent a deterministic
+    tie-break, the "crewai" module node is inserted into the graph before
+    the "langgraph.graph" node (alphabetical file processing: a_crewai.py,
+    then z_langgraph.py, then main.py) -- reproducing the exact scenario
+    that used to make detect_framework() return "crewai". The correct,
+    deterministic result must match FRAMEWORK_IMPORTS' own declaration
+    order (superrobot.pipeline.scanner.FRAMEWORK_IMPORTS lists "langgraph"
+    before "crewai"), i.e. "langgraph", regardless of insertion order.
+    """
+    (tmp_path / "a_crewai.py").write_text(
+        "from crewai import Agent\n\ndef use_crewai():\n    return Agent\n"
+    )
+    (tmp_path / "z_langgraph.py").write_text(
+        "from langgraph.graph import StateGraph\n\ndef use_langgraph():\n    return StateGraph\n"
+    )
+    (tmp_path / "main.py").write_text(
+        "from a_crewai import use_crewai\n"
+        "from z_langgraph import use_langgraph\n\n"
+        "def run_agent():\n"
+        "    use_crewai()\n"
+        "    use_langgraph()\n\n"
+        "if __name__ == '__main__':\n"
+        "    run_agent()\n"
+    )
+    repo_graph = build_repo_graph(tmp_path)
+    entry = resolve_entry_point(repo_graph)
+
+    result = detect_framework(repo_graph, entry)
+
+    assert result.framework == "langgraph"
