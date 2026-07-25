@@ -37,3 +37,35 @@ def test_leaves_unrelated_imports_unchanged() -> None:
 
     assert count == 0
     assert result == source
+
+
+def test_does_not_corrupt_single_dot_relative_import() -> None:
+    source = "from .search import search\n"
+    result, count = rewrite_imports_libcst(source, {"search": "totally_unrelated_flat_module"})
+
+    assert count == 0
+    assert result == source
+
+
+def test_does_not_corrupt_double_dot_relative_import() -> None:
+    source = "from ..other import x\n"
+    result, count = rewrite_imports_libcst(source, {"other": "totally_unrelated_flat_module"})
+
+    assert count == 0
+    assert result == source
+
+
+def test_malformed_source_returns_unchanged_instead_of_raising() -> None:
+    source = "def f(:\n    pass\n"
+    result, count = rewrite_imports_libcst(source, {"tools.search": "search"})
+
+    assert count == 0
+    assert result == source
+
+
+def test_import_x_dot_y_not_rewritten_known_limitation() -> None:
+    source = "import tools.search\n"
+    result, count = rewrite_imports_libcst(source, {"tools.search": "search"})
+
+    assert count == 0
+    assert result == source
