@@ -37,3 +37,20 @@ def test_returns_none_when_unresolvable(tmp_path: Path) -> None:
     repo_graph = build_repo_graph(tmp_path)
 
     assert resolve_entry_point(repo_graph) is None
+
+
+def test_resolve_entry_point_skips_broken_symlink_without_raising(tmp_path: Path) -> None:
+    """A broken/dangling symlink anywhere under repo_root must not crash
+    _resolve_main_guard_call's own file-reading loop (a duplicate of the
+    same read/parse pattern in builder.py) -- FileNotFoundError is an
+    OSError subclass and rglob("*.py") matches by name alone, without
+    checking the symlink resolves."""
+    import os
+
+    (tmp_path / "main.py").write_text(
+        "def run_agent():\n    return 'ok'\n\nif __name__ == '__main__':\n    run_agent()\n"
+    )
+    os.symlink(tmp_path / "does_not_exist.py", tmp_path / "broken_link.py")
+    repo_graph = build_repo_graph(tmp_path)
+
+    assert resolve_entry_point(repo_graph) == "main.run_agent"
