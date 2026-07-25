@@ -16,7 +16,11 @@ from __future__ import annotations
 import ast
 import tomllib
 
-from superrobot.pipeline.graph.builder import RepoGraph, module_dotted_name
+from superrobot.pipeline.graph.builder import (
+    RepoGraph,
+    code_object_node_id,
+    module_dotted_name,
+)
 
 
 def resolve_entry_point(repo_graph: RepoGraph) -> str | None:
@@ -42,7 +46,13 @@ def _resolve_console_script(repo_graph: RepoGraph) -> str | None:
         module_part, _, func_part = target.partition(":")
         if not func_part:
             continue
-        candidate = f"{module_part}.{func_part}"
+        # Route through code_object_node_id: the bare "module.func" dotted
+        # name this constructs could collide with a real module's own
+        # dotted name (e.g. a console-script target `pkg:b` where pkg's
+        # __init__.py defines `b` AND a sibling module pkg/b.py exists),
+        # in which case the function actually lives at the disambiguated
+        # id -- see builder.code_object_node_id.
+        candidate = code_object_node_id(f"{module_part}.{func_part}", repo_graph.graph)
         if candidate in repo_graph.graph:
             return candidate
     return None
@@ -51,8 +61,9 @@ def _resolve_console_script(repo_graph: RepoGraph) -> str | None:
 def _resolve_main_guard_call(repo_graph: RepoGraph) -> str | None:
     for py_file in repo_graph.repo_root.rglob("*.py"):
         try:
-            tree = ast.parse(py_file.read_text(), filename=str(py_file))
-        except (SyntaxError, UnicodeDecodeError):
+            source = py_file.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(source, filename=str(py_file))
+        except (SyntaxError, UnicodeDecodeError, OSError):
             continue
 
         mod_name = module_dotted_name(py_file, repo_graph.repo_root)

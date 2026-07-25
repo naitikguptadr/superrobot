@@ -297,6 +297,125 @@ def test_build_repo_graph_real_import_wins_when_type_checking_import_comes_secon
     assert not edge_data.get("type_checking_only", False)
 
 
+def test_build_repo_graph_finds_files_under_dot_prefixed_ancestor_dir(tmp_path: Path) -> None:
+    """iter_python_files()/build_repo_graph() must check paths RELATIVE to
+    repo_root, not the full absolute path -- a dot-prefixed ANCESTOR
+    directory above repo_root (e.g. a repo living under ~/.cache/... on a
+    CI runner) must not cause every file to look "hidden" and be
+    silently excluded, leaving an empty graph."""
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    repo_root = tmp_path / ".hidden_ancestor" / "myrepo"
+    (repo_root / "pkg").mkdir(parents=True)
+    (repo_root / "pkg" / "__init__.py").write_text("")
+    (repo_root / "pkg" / "tools.py").write_text(
+        "def search(query: str) -> str:\n    return query\n"
+    )
+    (repo_root / "main.py").write_text("def run_agent():\n    return 'ok'\n")
+
+    repo_graph = build_repo_graph(repo_root)
+    graph = repo_graph.graph
+
+    assert graph.number_of_nodes() > 0
+    assert graph.nodes["main"]["kind"] == "module"
+    assert graph.nodes["pkg.tools"]["kind"] == "module"
+    assert graph.nodes["pkg.tools.search"]["kind"] == "function"
+
+
+def test_build_repo_graph_does_not_attribute_nested_function_calls_to_outer_function(
+    tmp_path: Path,
+) -> None:
+    """A call made inside a nested inner function must be attributed only
+    to that inner function, never spuriously also to every enclosing outer
+    function -- ast.walk(outer_func_node) yields everything inside a
+    nested inner function too, so naively walking each function's full
+    subtree double (or triple, etc.) counts calls made only by inner
+    functions never actually invoked by the outer function's own code."""
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "main.py").write_text(
+        "def helper():\n"
+        "    return 1\n\n"
+        "def outer():\n"
+        "    def inner():\n"
+        "        return helper()\n"
+        "    return inner\n"
+    )
+
+    repo_graph = build_repo_graph(tmp_path)
+    graph = repo_graph.graph
+
+    assert not graph.has_edge("main.outer", "main.helper")
+    assert graph.has_edge("main.outer.inner", "main.helper")
+    assert graph.get_edge_data("main.outer.inner", "main.helper")["kind"] == "calls"
+
+
+def test_build_repo_graph_skips_broken_symlink_without_raising(tmp_path: Path) -> None:
+    """A broken/dangling symlink anywhere in the scanned tree is matched by
+    rglob("*.py") by name pattern alone, without checking it resolves.
+    Reading it raises FileNotFoundError (an OSError subclass), which must
+    be caught and skipped just like a SyntaxError/UnicodeDecodeError,
+    rather than crashing the whole build_repo_graph() call for the entire
+    repo over one unrelated broken symlink."""
+    import os
+
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "main.py").write_text("def run_agent():\n    return 'ok'\n")
+    os.symlink(tmp_path / "does_not_exist.py", tmp_path / "broken_link.py")
+
+    repo_graph = build_repo_graph(tmp_path)
+    graph = repo_graph.graph
+
+    assert graph.nodes["main"]["kind"] == "module"
+    assert "broken_link" not in graph.nodes
+
+
+def test_build_repo_graph_disambiguates_module_and_same_named_function_in_init(
+    tmp_path: Path,
+) -> None:
+    """A package's __init__.py can define a function/class whose name
+    matches a sibling submodule (e.g. `def b(): ...` in pkg/__init__.py
+    vs. a sibling module pkg/b.py) -- module_dotted_name() strips the
+    "__init__" segment, so both would naively compute the exact same bare
+    node id "pkg.b". graph.add_node()'s attribute-merge behavior means
+    whichever gets processed second silently overwrites the other's
+    kind/path/line, erasing one of the two entities from the graph with no
+    error. They must end up as two DISTINCT nodes with correct `kind`
+    attributes.
+
+    The module keeps its plain id "pkg.b" (kind="module"); the colliding
+    function resolves to the disambiguated id "pkg.b:obj" (kind="function")
+    -- see builder.code_object_node_id's docstring for why.
+    """
+    from superrobot.pipeline.graph.builder import build_repo_graph, code_object_node_id
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("def b():\n    return 1\n")
+    (tmp_path / "pkg" / "b.py").write_text("VAL = 42\n")
+
+    repo_graph = build_repo_graph(tmp_path)
+    graph = repo_graph.graph
+
+    # The module "pkg.b" (from pkg/b.py) must exist, untouched, under its
+    # plain dotted id.
+    assert graph.nodes["pkg.b"]["kind"] == "module"
+
+    # The function "b" defined in pkg/__init__.py must ALSO exist, under
+    # its disambiguated id -- not silently missing, and not merged into
+    # the module node.
+    disambiguated_id = code_object_node_id("pkg.b", graph)
+    assert disambiguated_id != "pkg.b"
+    assert disambiguated_id in graph
+    assert graph.nodes[disambiguated_id]["kind"] == "function"
+    assert graph.nodes[disambiguated_id]["line"] == 1
+
+    # The "defines" edge from the package module ("pkg") to the function
+    # must reference the disambiguated id, not the (module-owned) bare id.
+    assert graph.has_edge("pkg", disambiguated_id)
+    assert graph.get_edge_data("pkg", disambiguated_id)["kind"] == "defines"
+
+
 def test_build_repo_graph_resolves_cross_file_method_calls(tmp_path: Path) -> None:
     """Regression test for the full_name qualification fix: a call to a
     method on an imported class must resolve to the nested-qualified
