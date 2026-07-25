@@ -3,6 +3,8 @@ import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
+const RECONNECT_DELAY_MS = 2000;
+
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
 
@@ -107,5 +109,31 @@ describe("App", () => {
     render(<App />);
 
     expect(MockWebSocket.instances[0].url).toMatch(/^ws:\/\//);
+  });
+
+  it("schedules only one reconnect even if onclose fires multiple times in quick succession", () => {
+    vi.useFakeTimers();
+    render(<App />);
+    const firstWs = MockWebSocket.instances[0];
+
+    // First close event
+    act(() => {
+      firstWs.onclose?.();
+    });
+
+    // Second close event (e.g. from a misbehaving proxy or polyfill) fires immediately
+    act(() => {
+      firstWs.onclose?.();
+    });
+
+    // Advance time to after the reconnect delay, but not double the delay
+    act(() => {
+      vi.advanceTimersByTime(RECONNECT_DELAY_MS);
+    });
+
+    // Should have created only the initial WS and one reconnect WS, not two
+    expect(MockWebSocket.instances).toHaveLength(2);
+
+    vi.useRealTimers();
   });
 });

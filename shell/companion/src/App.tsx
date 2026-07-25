@@ -98,6 +98,9 @@ export function App(): JSX.Element {
       ws.onclose = () => {
         setConnectionStatus("closed");
         if (!cancelled) {
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+          }
           reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS);
         }
       };
