@@ -19,6 +19,7 @@ import tomllib
 from superrobot.pipeline.graph.builder import (
     RepoGraph,
     code_object_node_id,
+    iter_python_files,
     module_dotted_name,
 )
 
@@ -59,7 +60,13 @@ def _resolve_console_script(repo_graph: RepoGraph) -> str | None:
 
 
 def _resolve_main_guard_call(repo_graph: RepoGraph) -> str | None:
-    for py_file in repo_graph.repo_root.rglob("*.py"):
+    # Use the same exclusion logic that already built repo_graph itself
+    # (venvs/caches/vendored dirs/hidden dirs) -- a raw, unfiltered
+    # rglob("*.py") would walk into vendored dependency code that was
+    # never part of the graph in the first place, letting some installed
+    # package's own CLI script's `if __name__ == "__main__":` guard be
+    # mistaken for the repo's real entry point.
+    for py_file in iter_python_files(repo_graph.repo_root):
         try:
             source = py_file.read_text(encoding="utf-8", errors="replace")
             tree = ast.parse(source, filename=str(py_file))

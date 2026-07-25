@@ -18,6 +18,11 @@ def check_unreachable_frameworks(
 ) -> list[GapFinding]:
     """Flag framework imports present in the repo but not reachable from
     the resolved entry point, as a non-blocking warning.
+
+    No findings are produced if `entry_point` is None or doesn't resolve
+    into the graph -- see `entry_points.resolve_entry_point`. In that case
+    `detect_framework` treats every import as "reachable" (there's no call
+    path to narrow against), so nothing can ever be flagged unreachable.
     """
     result = detect_framework(repo_graph, entry_point)
     return [
