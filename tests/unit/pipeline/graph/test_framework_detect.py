@@ -206,3 +206,43 @@ def test_reachable_framework_tie_break_is_deterministic(tmp_path: Path) -> None:
     result = detect_framework(repo_graph, entry)
 
     assert result.framework == "langgraph"
+
+
+def test_langchain_beats_unrelated_framework_when_no_langgraph_is_involved(
+    tmp_path: Path,
+) -> None:
+    """Regression test for the blanket "langchain always loses" tie-break
+    bug: langchain must ONLY be demoted in favor of "langgraph" (the one
+    real, narrow special case -- see _LANGGRAPH_BEATS_LANGCHAIN's comment
+    in framework_detect.py), never in favor of an unrelated framework it
+    happens to tie with. Here a `langchain_core.tools.tool` import is
+    reachable alongside an unrelated reachable `crewai` import, with no
+    langgraph anywhere in the repo. Since FRAMEWORK_IMPORTS declares
+    "langchain" before "crewai", and there is no langgraph signal to
+    justify demoting it, "langchain" must win the tie -- reporting
+    "crewai" here would be exactly the false positive the blanket
+    demotion produced (this would have failed before the fix, since the
+    old code unconditionally pushed "langchain" to the very end of the
+    priority order regardless of whether langgraph was involved).
+    """
+    (tmp_path / "a_crewai.py").write_text(
+        "from crewai import Agent\n\ndef use_crewai():\n    return Agent\n"
+    )
+    (tmp_path / "z_langchain.py").write_text(
+        "from langchain_core.tools import tool\n\ndef use_langchain():\n    return tool\n"
+    )
+    (tmp_path / "main.py").write_text(
+        "from a_crewai import use_crewai\n"
+        "from z_langchain import use_langchain\n\n"
+        "def run_agent():\n"
+        "    use_crewai()\n"
+        "    use_langchain()\n\n"
+        "if __name__ == '__main__':\n"
+        "    run_agent()\n"
+    )
+    repo_graph = build_repo_graph(tmp_path)
+    entry = resolve_entry_point(repo_graph)
+
+    result = detect_framework(repo_graph, entry)
+
+    assert result.framework == "langchain"
