@@ -8,7 +8,7 @@ import {
 import { Badge } from "@datarobot/design-system/badge";
 import { Stepper } from "@datarobot/design-system/stepper";
 import type { Step } from "@datarobot/design-system/stepper";
-import { badgePropsForStatus } from "./status-mapping";
+import { badgePropsForStatus, labelForStatus } from "./status-mapping";
 import type { PipelineState, StageId } from "./pipeline-types";
 
 export interface PipelineViewProps {
@@ -56,15 +56,20 @@ export function PipelineView({ state }: PipelineViewProps) {
     hasErrored: stage.status === "failed",
   }));
 
-  const activeKey = state.find((s) => s.status === "active")?.id ?? state[state.length - 1].id;
+  // When no stage is "active" yet (e.g. the pipeline hasn't started and
+  // every stage is still "pending"), fall back to the FIRST stage rather
+  // than the last -- the Stepper marks everything before `activeKey` as
+  // completed, so falling back to the last stage would falsely show the
+  // whole pipeline as done.
+  const activeKey = state.find((s) => s.status === "active")?.id ?? state[0].id;
 
   return (
     <div>
-      <Stepper steps={steps} onClick={noop} activeKey={activeKey} />
+      <Stepper steps={steps} onClick={noop} activeKey={activeKey} isDisabled />
       <ul>
         {state.map((stage) => (
           <li key={stage.id} aria-label={STAGE_LABELS[stage.id] ?? stage.id}>
-            <Badge {...badgePropsForStatus(stage.status)} />
+            <Badge {...badgePropsForStatus(stage.status)} label={labelForStatus(stage.status)} />
             {stage.detail && <span>{stage.detail}</span>}
           </li>
         ))}
