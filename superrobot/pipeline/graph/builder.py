@@ -275,7 +275,13 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
     .goto(), which only follows one hop to the import statement rather
     than the true definition (verified against real jedi 0.20 behavior).
     """
-    repo_root = Path(repo_root)
+    # Normalize to an absolute, symlink-resolved path (same as
+    # scanner.scan's `Path(repo_path).resolve()`). Pass 2 keeps a jedi call
+    # target only when `target_path.is_relative_to(repo_root)`, and jedi's
+    # `Definition.module_path` is always absolute -- so a relative
+    # repo_root would make that check False for every single target and
+    # silently drop the entire cross-file call graph, with no error.
+    repo_root = Path(repo_root).resolve()
     graph = nx.DiGraph()
     py_files = iter_python_files(repo_root)
     file_asts: dict[Path, ast.Module] = {}

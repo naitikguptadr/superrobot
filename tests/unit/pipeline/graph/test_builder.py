@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from superrobot.pipeline.graph.builder import RepoGraph, module_dotted_name
 
 
@@ -440,3 +442,43 @@ def test_build_repo_graph_resolves_cross_file_method_calls(tmp_path: Path) -> No
     graph = repo_graph.graph
 
     assert graph.has_edge("main.run_agent", "pkg.tools.Foo.search")
+
+
+def test_build_repo_graph_resolves_call_edges_for_a_relative_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """build_repo_graph() must behave identically whether repo_root is
+    given as an absolute or a relative path.
+
+    jedi's `Definition.module_path` is always absolute, and pass 2 keeps a
+    call target only if `target_path.is_relative_to(repo_root)`. A
+    relative repo_root makes that check compare an absolute path against a
+    relative one, which is False for EVERY target -- so the whole cross-
+    file call graph is silently dropped and the graph ends up with zero
+    "calls" edges, with no error anywhere.
+
+    That used to be invisible because nothing consumed `calls` edges:
+    resolve_entry_point() returned None for any repo without a
+    __main__ guard/console script, and detect_framework() treats an
+    unresolved entry point as "everything is reachable". Now that the
+    tier-3 name heuristic resolves an entry point for ordinary agent
+    repos, those edges drive real reachability, and losing them silently
+    downgrades a correct detection into an "unreachable framework
+    import" false positive. scanner.scan() already normalizes with
+    Path(repo_path).resolve() for the same reason.
+    """
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query):\n    return query\n")
+    (tmp_path / "main.py").write_text(
+        "from pkg.tools import search\n\ndef run_agent():\n    return search('hi')\n"
+    )
+
+    absolute_graph = build_repo_graph(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    relative_graph = build_repo_graph(Path("."))
+
+    assert absolute_graph.graph.has_edge("main.run_agent", "pkg.tools.search")
+    assert relative_graph.graph.has_edge("main.run_agent", "pkg.tools.search")
