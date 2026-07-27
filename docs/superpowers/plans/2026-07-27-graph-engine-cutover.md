@@ -56,10 +56,7 @@ def test_falls_back_to_heuristic_when_no_guard_or_console_script(tmp_path: Path)
     "everything is reachable").
     """
     (tmp_path / "main.py").write_text(
-        "def helper():\n"
-        "    return 1\n\n"
-        "def run_agent():\n"
-        "    return helper()\n"
+        "def helper():\n    return 1\n\ndef run_agent():\n    return helper()\n"
     )
     repo_graph = build_repo_graph(tmp_path)
 
@@ -68,10 +65,7 @@ def test_falls_back_to_heuristic_when_no_guard_or_console_script(tmp_path: Path)
 
 def test_heuristic_prefers_higher_priority_name(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
-        "def process():\n"
-        "    return 1\n\n"
-        "def run_agent():\n"
-        "    return 2\n"
+        "def process():\n    return 1\n\ndef run_agent():\n    return 2\n"
     )
     repo_graph = build_repo_graph(tmp_path)
 
@@ -245,9 +239,7 @@ from superrobot.pipeline.scanner import scan
 
 def test_enrichment_never_lowers_scanner_confidence(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
-        "from crewai import Agent\n\n"
-        "def run_agent():\n"
-        "    return Agent\n"
+        "from crewai import Agent\n\ndef run_agent():\n    return Agent\n"
     )
     base = scan(tmp_path)
     enriched = enrich_scan_result(base, tmp_path)
@@ -279,10 +271,7 @@ def test_enrichment_promotes_the_graph_resolved_entry_point_to_first(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "main.py").write_text(
-        "def process():\n"
-        "    return 1\n\n"
-        "def run_agent():\n"
-        "    return process()\n"
+        "def process():\n    return 1\n\ndef run_agent():\n    return process()\n"
     )
     base = scan(tmp_path)
     enriched = enrich_scan_result(base, tmp_path)
@@ -378,9 +367,7 @@ def enrich_scan_result(base: ScanResult, repo_path: str | Path) -> ScanResult:
     return enriched
 
 
-def _promote_entry_point(
-    entry_points: list[EntryPoint], entry_point: str
-) -> list[EntryPoint]:
+def _promote_entry_point(entry_points: list[EntryPoint], entry_point: str) -> list[EntryPoint]:
     """Move the scanner-discovered EntryPoint matching `entry_point` to the
     front of the list, leaving every other candidate in place.
     """
@@ -427,10 +414,7 @@ from superrobot.engine.pipeline import TransformEngine
 
 def test_run_scan_returns_graph_enriched_result(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
-        "def process():\n"
-        "    return 1\n\n"
-        "def run_agent():\n"
-        "    return process()\n"
+        "def process():\n    return 1\n\ndef run_agent():\n    return process()\n"
     )
 
     result = TransformEngine().run_scan(str(tmp_path))
@@ -523,21 +507,15 @@ def test_reports_unreachable_framework_import_from_source_repo(
     source_repo = tmp_path / "src"
     source_repo.mkdir()
     (source_repo / "dead_code.py").write_text(
-        "from crewai import Agent\n\n"
-        "def unused():\n"
-        "    return Agent\n"
+        "from crewai import Agent\n\ndef unused():\n    return Agent\n"
     )
     (source_repo / "main.py").write_text(
-        "from langgraph.graph import StateGraph\n\n"
-        "def run_agent():\n"
-        "    return StateGraph\n"
+        "from langgraph.graph import StateGraph\n\ndef run_agent():\n    return StateGraph\n"
     )
 
     report = run_gap_analysis(package_dir, source_repo=source_repo)
 
-    unreachable = [
-        f for f in report.findings if f.rule == "unreachable-framework-import"
-    ]
+    unreachable = [f for f in report.findings if f.rule == "unreachable-framework-import"]
     assert unreachable, "expected an unreachable-framework-import finding"
     assert all(f.severity == "warning" for f in unreachable)
     assert any("crewai" in f.message for f in unreachable)
@@ -550,9 +528,7 @@ def test_no_unreachable_findings_when_no_source_repo_is_given(tmp_path: Path) ->
 
     report = run_gap_analysis(package_dir)
 
-    assert not [
-        f for f in report.findings if f.rule == "unreachable-framework-import"
-    ]
+    assert not [f for f in report.findings if f.rule == "unreachable-framework-import"]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -565,22 +541,18 @@ Expected: the first test FAILS (no such finding is produced today).
 In `superrobot/pipeline/gap_analysis.py`, inside `run_gap_analysis`, after the existing findings are collected and only when `source_repo is not None` (the check analyzes the *original* repo, not the generated package), append the graph-derived findings. Wrap in try/except so a graph failure can never break validation:
 
 ```python
-    if source_repo is not None:
-        try:
-            from superrobot.pipeline.graph.builder import build_repo_graph
-            from superrobot.pipeline.graph.entry_points import resolve_entry_point
-            from superrobot.pipeline.graph.gap_analysis import (
-                check_unreachable_frameworks,
-            )
+if source_repo is not None:
+    try:
+        from superrobot.pipeline.graph.builder import build_repo_graph
+        from superrobot.pipeline.graph.entry_points import resolve_entry_point
+        from superrobot.pipeline.graph.gap_analysis import (
+            check_unreachable_frameworks,
+        )
 
-            repo_graph = build_repo_graph(Path(source_repo))
-            findings.extend(
-                check_unreachable_frameworks(
-                    repo_graph, resolve_entry_point(repo_graph)
-                )
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("graph gap-analysis checks skipped: %s", exc)
+        repo_graph = build_repo_graph(Path(source_repo))
+        findings.extend(check_unreachable_frameworks(repo_graph, resolve_entry_point(repo_graph)))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("graph gap-analysis checks skipped: %s", exc)
 ```
 
 Add a module-level `logger = logging.getLogger(__name__)` and `import logging` if not already present.
