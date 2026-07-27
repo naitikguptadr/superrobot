@@ -17,6 +17,7 @@ from superrobot.pipeline.config_generator import (
 )
 from superrobot.pipeline.deployer import DeployResult, deploy
 from superrobot.pipeline.evaluator import run_eval
+from superrobot.pipeline.graph.enrich import enrich_scan_result
 from superrobot.pipeline.scanner import scan
 from superrobot.repo import clone_repository
 
@@ -44,8 +45,14 @@ class TransformEngine:
         raise FileNotFoundError(msg)
 
     def run_scan(self, repo_path: str) -> ScanResult:
+        """Stage 1 — static scan, enriched with whole-repo graph analysis.
+
+        Enrichment is conservative and total (see graph/enrich.py): it can
+        only improve confidence and entry-point ordering, and degrades to the
+        raw scanner result for any repo the graph can't handle.
+        """
         self._emit("scan", repo_path)
-        return scan(repo_path)
+        return enrich_scan_result(scan(repo_path), repo_path)
 
     async def run_analyze(self, scan_result: ScanResult) -> AnalysisResult:
         self._emit("analyze", scan_result.detected_framework)
