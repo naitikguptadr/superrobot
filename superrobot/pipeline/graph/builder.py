@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,29 @@ _EXCLUDED_DIR_NAMES = {"__pycache__", "venv", ".venv", "node_modules", ".git"}
 # directory/file segments joined by ".", so they can never contain a ":",
 # guaranteeing this can never itself collide with anything.
 _COLLISION_SUFFIX = ":obj"
+
+
+class GraphBuildTimeout(Exception):
+    """Raised when `build_repo_graph` exceeds its caller-supplied deadline.
+
+    Deliberately aborts the entire build rather than returning whatever was
+    graphed so far. A truncated graph is not a smaller-but-correct graph: it
+    is missing "calls" edges, and every consumer of those edges reasons about
+    *reachability*, so a missing edge reads as "this code is never called".
+    That turns straight into false "unreachable framework import" findings
+    telling users to delete imports their code genuinely needs. The graph is
+    therefore all-or-nothing -- callers catch this and degrade to their
+    non-graph behavior (see enrich.enrich_scan_result and
+    pipeline.gap_analysis._graph_findings).
+    """
+
+
+def _check_deadline(deadline: float | None) -> None:
+    """Raise `GraphBuildTimeout` if `deadline` (an absolute
+    `time.monotonic()` timestamp) has passed. A `None` deadline never fires.
+    """
+    if deadline is not None and time.monotonic() > deadline:
+        raise GraphBuildTimeout(f"graph build exceeded its {deadline:.3f} monotonic deadline")
 
 
 def module_dotted_name(py_file: Path, repo_root: Path) -> str:
@@ -311,7 +335,7 @@ def _aliasing_names(tree: ast.AST) -> set[str]:
     return names
 
 
-def build_repo_graph(repo_root: Path) -> RepoGraph:
+def build_repo_graph(repo_root: Path, *, deadline: float | None = None) -> RepoGraph:
     """Build a RepoGraph for the Python repo at repo_root.
 
     Pass 1: ast-based structure (modules, function/class definitions
@@ -319,6 +343,15 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
     Pass 2: cross-file call resolution via jedi.Script.infer() -- NOT
     .goto(), which only follows one hop to the import statement rather
     than the true definition (verified against real jedi 0.20 behavior).
+
+    `deadline` is an optional absolute `time.monotonic()` timestamp past
+    which the build gives up and raises `GraphBuildTimeout` (see there for
+    why it aborts wholesale instead of returning a partial graph). It is
+    checked once per file in pass 2 -- that loop is where essentially all
+    the time goes, and per-file is fine-grained enough to bound the
+    overrun to a single file's inferences while keeping the check out of
+    the per-call-site hot path. The default `None` means no deadline at
+    all, so the ast passes and every existing caller are unaffected.
     """
     # Normalize to an absolute, symlink-resolved path (same as
     # scanner.scan's `Path(repo_path).resolve()`). Pass 2 keeps a jedi call
@@ -441,8 +474,13 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
         if attrs.get("kind") in ("function", "class")
     } | aliasing_names
 
+    # Checked here as well as per-file so an already-expired deadline still
+    # aborts a repo with no parseable files, rather than quietly succeeding.
+    _check_deadline(deadline)
+
     project = jedi.Project(path=str(repo_root))
     for py_file, tree in file_asts.items():
+        _check_deadline(deadline)
         mod_name = module_names[py_file]
         try:
             script = jedi.Script(path=str(py_file), project=project)

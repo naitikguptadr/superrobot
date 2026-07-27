@@ -23,14 +23,41 @@ Two invariants make this safe to run unconditionally:
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 from superrobot.models.scan_result import EntryPoint, ScanResult
-from superrobot.pipeline.graph.builder import build_repo_graph, strip_collision_suffix
+from superrobot.pipeline.graph.builder import (
+    GraphBuildTimeout,
+    build_repo_graph,
+    strip_collision_suffix,
+)
 from superrobot.pipeline.graph.entry_points import resolve_entry_point
 from superrobot.pipeline.graph.framework_detect import detect_framework
 
 logger = logging.getLogger(__name__)
+
+# Wall-clock budget for the whole graph build during `superrobot scan`.
+#
+# `scan` was near-instant before the graph engine and is the command users
+# run interactively and repeatedly, so this is chosen as a *latency
+# contract* -- "scan is never more than ~5s slower than it used to be" --
+# rather than as an attempt to always finish the graph.
+#
+# Measured on this repo: ~2.2s for 50 files, ~4.4s for 150. Cost scales with
+# the number of in-repo call sites, so a 500-file repo would run well over
+# 10s and a pathological one far worse. 5s therefore keeps enrichment for
+# the small-to-medium agent repos this tool targets and deliberately gives
+# it up beyond roughly that size, instead of making everyone wait.
+#
+# Giving it up is cheap and safe: exceeding the budget discards the graph
+# entirely (see `GraphBuildTimeout` -- never a truncated one) and returns
+# the scanner's own result, so the cost of a trip is losing an optional
+# confidence bump and entry-point reordering, never a wrong answer.
+#
+# `validate` deliberately trades the other way; see
+# `superrobot.pipeline.gap_analysis.GAP_ANALYSIS_GRAPH_BUDGET_SECONDS`.
+ENRICHMENT_BUDGET_SECONDS = 5.0
 
 
 def enrich_scan_result(base: ScanResult, repo_path: str | Path) -> ScanResult:
@@ -39,9 +66,22 @@ def enrich_scan_result(base: ScanResult, repo_path: str | Path) -> ScanResult:
     Returns `base` unchanged if the repo cannot be graphed. Never raises.
     """
     try:
-        repo_graph = build_repo_graph(Path(repo_path))
+        repo_graph = build_repo_graph(
+            Path(repo_path), deadline=time.monotonic() + ENRICHMENT_BUDGET_SECONDS
+        )
         entry_point = resolve_entry_point(repo_graph)
         detection = detect_framework(repo_graph, entry_point)
+    except GraphBuildTimeout:
+        # Distinguished from the generic failure below purely so the log
+        # says which one happened: "too slow on this repo" is a tuning
+        # signal, "the graph blew up" is a bug report.
+        logger.debug(
+            "graph enrichment timed out for %s after its %.1fs budget; "
+            "returning the unenriched scan result",
+            repo_path,
+            ENRICHMENT_BUDGET_SECONDS,
+        )
+        return base
     except Exception as exc:  # noqa: BLE001 - defensive, see module docstring
         logger.debug("graph enrichment skipped for %s: %s", repo_path, exc)
         return base

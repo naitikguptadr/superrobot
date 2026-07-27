@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from superrobot.pipeline.graph.builder import GraphBuildTimeout
 from superrobot.pipeline.graph.enrich import enrich_scan_result
 from superrobot.pipeline.graph.framework_detect import FrameworkDetection
 from superrobot.pipeline.scanner import scan
@@ -139,3 +140,70 @@ def test_enrichment_does_not_raise_confidence_when_frameworks_disagree(
     assert base.confidence < 1.0, "fixture must leave headroom for a bogus raise to show up"
     assert enriched.confidence == base.confidence
     assert enriched.detected_framework == base.detected_framework
+
+
+def _timeout_fixture(tmp_path: Path) -> None:
+    """A repo where enrichment demonstrably changes the scanner's answer.
+
+    The scanner ranks `process` (70 + 20 filename) above `main` (50 + 20),
+    but the graph traces the `__main__` guard and promotes `main`; crewai is
+    reachable from that traced entry point, so confidence rises too. Both
+    effects must vanish when the graph build times out.
+    """
+    (tmp_path / "app.py").write_text(
+        "from crewai import Agent\n\n\n"
+        "def process():\n"
+        "    return 1\n\n\n"
+        "def main():\n"
+        "    return process(), Agent\n\n\n"
+        'if __name__ == "__main__":\n'
+        "    main()\n"
+    )
+
+
+def test_enrichment_returns_the_base_result_unchanged_when_the_graph_build_times_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exceeding the enrichment budget degrades to the scanner's own result.
+
+    The guard must be all-or-nothing: no partially-built graph may leak into
+    the result, so neither of enrichment's two effects (raised confidence,
+    promoted entry point) may be half-applied.
+    """
+    _timeout_fixture(tmp_path)
+    base = scan(tmp_path)
+
+    # Control: with the real budget, enrichment *does* change the result --
+    # otherwise the timeout assertions below would pass vacuously.
+    enriched = enrich_scan_result(base, tmp_path)
+    assert enriched.primary_entry is not None
+    assert enriched.primary_entry.function == "main", "fixture no longer discriminates"
+
+    # A negative budget puts the deadline in the past before jedi ever runs.
+    monkeypatch.setattr("superrobot.pipeline.graph.enrich.ENRICHMENT_BUDGET_SECONDS", -1.0)
+    timed_out = enrich_scan_result(base, tmp_path)
+
+    assert timed_out == base
+    assert timed_out.confidence == base.confidence
+    assert [ep.function for ep in timed_out.entry_points] == [
+        ep.function for ep in base.entry_points
+    ]
+
+
+def test_enrichment_degrades_when_build_repo_graph_raises_the_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`GraphBuildTimeout` must be handled by `enrich_scan_result`, not
+    escape it -- enrichment never raises, whatever the reason for failure.
+    """
+    _timeout_fixture(tmp_path)
+    base = scan(tmp_path)
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise GraphBuildTimeout("graph build exceeded its deadline")
+
+    monkeypatch.setattr("superrobot.pipeline.graph.enrich.build_repo_graph", _raise)
+
+    assert enrich_scan_result(base, tmp_path) == base

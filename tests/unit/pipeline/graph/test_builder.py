@@ -559,3 +559,55 @@ def test_build_repo_graph_resolves_cls_call_inside_a_classmethod(tmp_path: Path)
 
     assert graph.has_edge("models.Config.load", "models.Config")
     assert graph.get_edge_data("models.Config.load", "models.Config")["kind"] == "calls"
+
+
+def test_build_repo_graph_raises_when_the_deadline_has_already_passed(tmp_path: Path) -> None:
+    """An exceeded deadline must abort the whole build by raising, never
+    return a partially-built graph.
+
+    A partial graph is missing "calls" edges, which makes genuinely
+    reachable imports look unreachable -- exactly the false-positive class
+    that tells users to delete imports their code needs. All-or-nothing is
+    the only safe truncation policy, so the deadline surfaces as an
+    exception that callers degrade on, not as a smaller RepoGraph.
+    """
+    import time
+
+    from superrobot.pipeline.graph.builder import GraphBuildTimeout, build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query):\n    return query\n")
+    (tmp_path / "main.py").write_text(
+        "from pkg.tools import search\n\ndef run_agent():\n    return search('hi')\n"
+    )
+
+    with pytest.raises(GraphBuildTimeout):
+        build_repo_graph(tmp_path, deadline=time.monotonic() - 1.0)
+
+
+def test_build_repo_graph_with_a_generous_deadline_is_identical_to_no_deadline(
+    tmp_path: Path,
+) -> None:
+    """The deadline is a pure guard: a build that finishes inside its budget
+    must produce exactly the graph an unbounded build would, and the default
+    (`deadline=None`) must stay completely unbounded.
+    """
+    import time
+
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query):\n    return query\n")
+    (tmp_path / "main.py").write_text(
+        "from pkg.tools import search\n\ndef run_agent():\n    return search('hi')\n"
+    )
+
+    unbounded = build_repo_graph(tmp_path).graph
+    bounded = build_repo_graph(tmp_path, deadline=time.monotonic() + 3600.0).graph
+
+    assert set(unbounded.nodes) == set(bounded.nodes)
+    assert set(unbounded.edges) == set(bounded.edges)
+    # The edge the deadline check sits closest to -- pass 2's jedi loop.
+    assert unbounded.has_edge("main.run_agent", "pkg.tools.search")
