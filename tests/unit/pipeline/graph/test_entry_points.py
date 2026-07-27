@@ -78,7 +78,15 @@ def test_ignores_main_guard_inside_vendored_venv_directory(tmp_path: Path) -> No
     not correspond to any real, callable function at all, and the actual
     repo code (app.py) has no `__main__` guard of its own. Excluding
     vendored directories (matching what the graph itself already
-    excludes) fixes this: resolve_entry_point() must fall through to None.
+    excludes) fixes this: the guard tier must find nothing at all here.
+
+    What resolve_entry_point() then returns is decided by the tier-3
+    name/filename heuristic, which correctly picks the repo's own
+    top-level `app.main` -- a real, callable function in non-vendored
+    code. Asserting that exact id (rather than the bare `is None` this
+    test used before tier 3 existed) keeps the regression this test
+    guards fully pinned: the vendored `venv/.../cli.py` placeholder id
+    must never be the answer.
     """
     (tmp_path / "app.py").write_text(
         "import venv.lib.some_package.cli.main as _unused\n\ndef main():\n    return 'real'\n"
@@ -90,5 +98,39 @@ def test_ignores_main_guard_inside_vendored_venv_directory(tmp_path: Path) -> No
 
     repo_graph = build_repo_graph(tmp_path)
     assert "venv.lib.some_package.cli.main" in repo_graph.graph
+
+    assert resolve_entry_point(repo_graph) == "app.main"
+
+
+def test_falls_back_to_heuristic_when_no_guard_or_console_script(tmp_path: Path) -> None:
+    """The common real-world case: an agent library with no __main__ guard
+    and no console script, but an obviously-named entry function. Before
+    tier 3 existed this returned None, which made the whole reachability
+    layer inert (detect_framework treats an empty reachable set as
+    "everything is reachable").
+    """
+    (tmp_path / "main.py").write_text(
+        "def helper():\n    return 1\n\ndef run_agent():\n    return helper()\n"
+    )
+    repo_graph = build_repo_graph(tmp_path)
+
+    assert resolve_entry_point(repo_graph) == "main.run_agent"
+
+
+def test_heuristic_prefers_higher_priority_name(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "def process():\n    return 1\n\ndef run_agent():\n    return 2\n"
+    )
+    repo_graph = build_repo_graph(tmp_path)
+
+    # scanner.ENTRY_PRIORITY ranks run_agent (100) above process (70).
+    assert resolve_entry_point(repo_graph) == "main.run_agent"
+
+
+def test_heuristic_returns_none_when_nothing_looks_like_an_entry_point(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text("def helper():\n    return 1\n")
+    repo_graph = build_repo_graph(tmp_path)
 
     assert resolve_entry_point(repo_graph) is None

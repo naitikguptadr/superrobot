@@ -8,6 +8,8 @@ need explicit waiver." (shell/prompts/system.md)
 
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 
 from superrobot.dr.platform_rules import (
@@ -18,7 +20,30 @@ from superrobot.dr.platform_rules import (
 )
 from superrobot.models.gap_result import GapFinding, GapReport
 
+logger = logging.getLogger(__name__)
+
 _FIXED_ENV_KEYS = {"PROMPT_TEMPLATE_ID", "DATAROBOT_ENDPOINT"}
+
+# Wall-clock budget for the graph build behind `validate`'s graph findings.
+#
+# Deliberately much larger than `scan`'s
+# `superrobot.pipeline.graph.enrich.ENRICHMENT_BUDGET_SECONDS` (5s). The two
+# budgets trade the same two things off in opposite directions:
+#
+# - `scan` is the fast, interactive, repeatedly-run command whose graph
+#   contribution is a nice-to-have (a confidence bump and entry-point
+#   reordering), so latency wins.
+# - `validate` is a deliberate, one-shot gate a user waits on anyway, and
+#   its unreachable-framework-import findings ARE the graph engine's main
+#   user-visible payoff -- timing out means silently reporting nothing,
+#   which is a much bigger loss than a few extra seconds.
+#
+# 30s is therefore an upper bound on pathological hangs rather than a
+# latency target. At the rate measured on this repo (~4.4s for 150 files)
+# it covers repos an order of magnitude larger than `scan`'s budget does,
+# so no realistic repo reaches it -- while still guaranteeing `validate`
+# can never appear wedged.
+GAP_ANALYSIS_GRAPH_BUDGET_SECONDS = 30.0
 
 
 def run_gap_analysis(package_dir: str | Path, source_repo: str | Path | None = None) -> GapReport:
@@ -90,7 +115,50 @@ def run_gap_analysis(package_dir: str | Path, source_repo: str | Path | None = N
                     )
                 )
 
+    if source_repo is not None:
+        findings.extend(_graph_findings(Path(source_repo)))
+
     return GapReport(findings=findings)
+
+
+def _graph_findings(source_repo: Path) -> list[GapFinding]:
+    """Graph-derived findings about the ORIGINAL repo the user wrote.
+
+    Deliberately runs against `source_repo`, never `package_dir`: an
+    unreachable framework import is a fact about the source the user
+    maintains, not about the generated DataRobot package (whose imports
+    SuperRobot itself wrote). Purely additive -- it appends findings and
+    never alters, reorders or suppresses any existing one.
+
+    Any failure is swallowed: the graph depends on jedi/networkx being able
+    to make sense of arbitrary user code, and `validate` must keep working
+    on repos the graph can't handle. That includes taking too long -- the
+    build is bounded by `GAP_ANALYSIS_GRAPH_BUDGET_SECONDS`, and a build
+    that blows the budget is discarded whole (never truncated, which would
+    manufacture bogus unreachable-import findings) and contributes no
+    findings at all.
+    """
+    try:
+        from superrobot.pipeline.graph.builder import GraphBuildTimeout, build_repo_graph
+        from superrobot.pipeline.graph.entry_points import resolve_entry_point
+        from superrobot.pipeline.graph.gap_analysis import check_unreachable_frameworks
+
+        try:
+            repo_graph = build_repo_graph(
+                source_repo, deadline=time.monotonic() + GAP_ANALYSIS_GRAPH_BUDGET_SECONDS
+            )
+        except GraphBuildTimeout:
+            logger.debug(
+                "graph gap-analysis checks timed out for %s after its %.1fs budget; "
+                "reporting no graph findings",
+                source_repo,
+                GAP_ANALYSIS_GRAPH_BUDGET_SECONDS,
+            )
+            return []
+        return check_unreachable_frameworks(repo_graph, resolve_entry_point(repo_graph))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("graph gap-analysis checks skipped: %s", exc)
+        return []
 
 
 def _parse_runtime_keys(env_template: str) -> list[str]:

@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,29 @@ _EXCLUDED_DIR_NAMES = {"__pycache__", "venv", ".venv", "node_modules", ".git"}
 # directory/file segments joined by ".", so they can never contain a ":",
 # guaranteeing this can never itself collide with anything.
 _COLLISION_SUFFIX = ":obj"
+
+
+class GraphBuildTimeout(Exception):
+    """Raised when `build_repo_graph` exceeds its caller-supplied deadline.
+
+    Deliberately aborts the entire build rather than returning whatever was
+    graphed so far. A truncated graph is not a smaller-but-correct graph: it
+    is missing "calls" edges, and every consumer of those edges reasons about
+    *reachability*, so a missing edge reads as "this code is never called".
+    That turns straight into false "unreachable framework import" findings
+    telling users to delete imports their code genuinely needs. The graph is
+    therefore all-or-nothing -- callers catch this and degrade to their
+    non-graph behavior (see enrich.enrich_scan_result and
+    pipeline.gap_analysis._graph_findings).
+    """
+
+
+def _check_deadline(deadline: float | None) -> None:
+    """Raise `GraphBuildTimeout` if `deadline` (an absolute
+    `time.monotonic()` timestamp) has passed. A `None` deadline never fires.
+    """
+    if deadline is not None and time.monotonic() > deadline:
+        raise GraphBuildTimeout(f"graph build exceeded its {deadline:.3f} monotonic deadline")
 
 
 def module_dotted_name(py_file: Path, repo_root: Path) -> str:
@@ -266,7 +290,52 @@ def _type_checking_guarded_node_ids(tree: ast.AST) -> set[int]:
     return guarded_ids
 
 
-def build_repo_graph(repo_root: Path) -> RepoGraph:
+def _aliasing_names(tree: ast.AST) -> set[str]:
+    """Collect every name in tree that is bound by something OTHER than a
+    plain ``def``/``class`` statement -- i.e. every name that could be an
+    *alias* for a function or class defined elsewhere.
+
+    This exists purely to keep `build_repo_graph`'s pass-2 pre-filter
+    sound. That filter wants to skip a call site when the name being
+    called syntactically cannot correspond to any definition in the repo,
+    but the two only line up when the call site names its target
+    directly. They come apart whenever the callable was rebound under a
+    different name, and the resolved definition's own name is the one
+    that ends up in the graph:
+
+        from .tools import search as find   # find() -> ...tools.search
+        alias = search                      # alias() -> ...tools.search
+        @classmethod
+        def load(cls): return cls()         # cls()   -> the class itself
+
+    Every such binding form is collected here -- import ``as`` clauses,
+    assignment/for/with/walrus/except targets (both bare names and
+    attribute targets, since a class-level ``handler = some_func`` is
+    reached as ``obj.handler()``), and function parameters (which is what
+    catches the very common ``cls``). This is deliberately a coarse
+    over-approximation gathered repo-wide: including a name that is not
+    actually an alias only costs one unnecessary inference, whereas
+    missing one would silently drop a real edge.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.alias):
+            if node.asname:
+                names.add(node.asname)
+        elif isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Store):
+                names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            if isinstance(node.ctx, ast.Store):
+                names.add(node.attr)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+    return names
+
+
+def build_repo_graph(repo_root: Path, *, deadline: float | None = None) -> RepoGraph:
     """Build a RepoGraph for the Python repo at repo_root.
 
     Pass 1: ast-based structure (modules, function/class definitions
@@ -274,8 +343,23 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
     Pass 2: cross-file call resolution via jedi.Script.infer() -- NOT
     .goto(), which only follows one hop to the import statement rather
     than the true definition (verified against real jedi 0.20 behavior).
+
+    `deadline` is an optional absolute `time.monotonic()` timestamp past
+    which the build gives up and raises `GraphBuildTimeout` (see there for
+    why it aborts wholesale instead of returning a partial graph). It is
+    checked once per file in pass 2 -- that loop is where essentially all
+    the time goes, and per-file is fine-grained enough to bound the
+    overrun to a single file's inferences while keeping the check out of
+    the per-call-site hot path. The default `None` means no deadline at
+    all, so the ast passes and every existing caller are unaffected.
     """
-    repo_root = Path(repo_root)
+    # Normalize to an absolute, symlink-resolved path (same as
+    # scanner.scan's `Path(repo_path).resolve()`). Pass 2 keeps a jedi call
+    # target only when `target_path.is_relative_to(repo_root)`, and jedi's
+    # `Definition.module_path` is always absolute -- so a relative
+    # repo_root would make that check False for every single target and
+    # silently drop the entire cross-file call graph, with no error.
+    repo_root = Path(repo_root).resolve()
     graph = nx.DiGraph()
     py_files = iter_python_files(repo_root)
     file_asts: dict[Path, ast.Module] = {}
@@ -300,9 +384,14 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
         module_names[py_file] = mod_name
         graph.add_node(mod_name, kind="module", path=str(py_file))
 
+    # Names that may be aliases for a definition, accumulated across every
+    # file; see `_aliasing_names` and the pass-2 pre-filter below.
+    aliasing_names: set[str] = set()
+
     for py_file, tree in file_asts.items():
         mod_name = module_names[py_file]
         _assign_parents(tree)
+        aliasing_names |= _aliasing_names(tree)
 
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -358,8 +447,40 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
             edge_kwargs = {"type_checking_only": True} if all_guarded else {}
             graph.add_edge(mod_name, import_target_name, kind="imports", **edge_kwargs)
 
+    # Pre-filter for pass 2. jedi's Script.infer() is by far the most
+    # expensive operation in this module, and pass 2 would otherwise run it
+    # once per call site in the repo -- including every `print(...)`,
+    # `len(...)`, and third-party call, which vastly outnumber the calls
+    # that can actually become edges.
+    #
+    # An edge is only ever added when `callee_id in graph`, and a
+    # function/class node id is `{module_dotted_name}.{qualified_name}` --
+    # so the last dotted segment of any id that could match is exactly the
+    # called function's own local name. If no function/class in the repo
+    # has that local name, and the called name is not one that could be an
+    # alias for such a definition (see `_aliasing_names` -- `cls(...)` in a
+    # classmethod is the common case), infer() provably cannot produce an
+    # edge, and the call site can be skipped without looking at it at all.
+    #
+    # Both halves must be a *superset* of what can really match: a name
+    # wrongly included merely costs one inference that finds nothing, but a
+    # name wrongly excluded silently drops a real edge. Hence this is built
+    # here, once, only after the structure pass above has finished -- every
+    # function/class node in the repo must already exist by now, or the set
+    # would be incomplete.
+    callable_names = {
+        strip_collision_suffix(node_id).rsplit(".", 1)[-1]
+        for node_id, attrs in graph.nodes(data=True)
+        if attrs.get("kind") in ("function", "class")
+    } | aliasing_names
+
+    # Checked here as well as per-file so an already-expired deadline still
+    # aborts a repo with no parseable files, rather than quietly succeeding.
+    _check_deadline(deadline)
+
     project = jedi.Project(path=str(repo_root))
     for py_file, tree in file_asts.items():
+        _check_deadline(deadline)
         mod_name = module_names[py_file]
         try:
             script = jedi.Script(path=str(py_file), project=project)
@@ -377,11 +498,14 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
                 if not isinstance(call, ast.Call):
                     continue
                 target = call.func
+                called_name: str
                 line: int | None
                 col: int | None
                 if isinstance(target, ast.Name):
+                    called_name = target.id
                     line, col = target.lineno, target.col_offset
                 elif isinstance(target, ast.Attribute):
+                    called_name = target.attr
                     line = target.end_lineno
                     col = (
                         target.end_col_offset - len(target.attr)
@@ -391,6 +515,11 @@ def build_repo_graph(repo_root: Path) -> RepoGraph:
                 else:
                     continue
                 if line is None or col is None:
+                    continue
+                # See `callable_names`: this name matches no definition in
+                # the repo and cannot be an alias for one, so infer() could
+                # not yield an edge -- skip the expensive inference.
+                if called_name not in callable_names:
                     continue
 
                 try:

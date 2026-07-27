@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from superrobot.pipeline.graph.builder import RepoGraph, module_dotted_name
 
 
@@ -440,3 +442,172 @@ def test_build_repo_graph_resolves_cross_file_method_calls(tmp_path: Path) -> No
     graph = repo_graph.graph
 
     assert graph.has_edge("main.run_agent", "pkg.tools.Foo.search")
+
+
+def test_build_repo_graph_resolves_call_edges_for_a_relative_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """build_repo_graph() must behave identically whether repo_root is
+    given as an absolute or a relative path.
+
+    jedi's `Definition.module_path` is always absolute, and pass 2 keeps a
+    call target only if `target_path.is_relative_to(repo_root)`. A
+    relative repo_root makes that check compare an absolute path against a
+    relative one, which is False for EVERY target -- so the whole cross-
+    file call graph is silently dropped and the graph ends up with zero
+    "calls" edges, with no error anywhere.
+
+    That used to be invisible because nothing consumed `calls` edges:
+    resolve_entry_point() returned None for any repo without a
+    __main__ guard/console script, and detect_framework() treats an
+    unresolved entry point as "everything is reachable". Now that the
+    tier-3 name heuristic resolves an entry point for ordinary agent
+    repos, those edges drive real reachability, and losing them silently
+    downgrades a correct detection into an "unreachable framework
+    import" false positive. scanner.scan() already normalizes with
+    Path(repo_path).resolve() for the same reason.
+    """
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query):\n    return query\n")
+    (tmp_path / "main.py").write_text(
+        "from pkg.tools import search\n\ndef run_agent():\n    return search('hi')\n"
+    )
+
+    absolute_graph = build_repo_graph(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    relative_graph = build_repo_graph(Path("."))
+
+    assert absolute_graph.graph.has_edge("main.run_agent", "pkg.tools.search")
+    assert relative_graph.graph.has_edge("main.run_agent", "pkg.tools.search")
+
+
+def test_build_repo_graph_call_prefilter_keeps_repo_calls_and_ignores_stdlib_calls(
+    tmp_path: Path,
+) -> None:
+    """Pass 2 skips jedi inference for any called name that could not match
+    a graph node. Both halves of that pre-filter's contract are pinned
+    here: a call to a name that IS defined in the repo must still produce
+    its "calls" edge, and a call to a stdlib/unknown name must still
+    produce none -- the filter is a pure speedup, so the resulting edge set
+    has to be exactly what it was when every call site was inferred.
+    """
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query):\n    return query\n")
+    (tmp_path / "main.py").write_text(
+        "from pkg.tools import search\n\n"
+        "def run_agent(items):\n"
+        "    print(len(items))\n"
+        "    return search('hi')\n"
+    )
+
+    graph = build_repo_graph(tmp_path).graph
+
+    calls_from_run_agent = {
+        target
+        for _, target, data in graph.out_edges("main.run_agent", data=True)
+        if data.get("kind") == "calls"
+    }
+    # The in-repo call survives the pre-filter...
+    assert calls_from_run_agent == {"pkg.tools.search"}
+    # ...and the stdlib calls contribute nothing at all.
+    assert not graph.has_node("print")
+    assert not graph.has_node("len")
+
+
+def test_build_repo_graph_resolves_call_made_through_an_import_alias(tmp_path: Path) -> None:
+    """A call site can name its target through an alias, so the pass-2
+    pre-filter cannot key purely off the names of definitions in the repo.
+
+    `from pkg.tools import search as find` means the call reads `find(...)`
+    while the definition -- and therefore the graph node id -- is
+    `pkg.tools.search`. Filtering on the syntactic name alone would skip
+    the inference and silently drop this real edge.
+    """
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query):\n    return query\n")
+    (tmp_path / "main.py").write_text(
+        "from pkg.tools import search as find\n\ndef run_agent():\n    return find('hi')\n"
+    )
+
+    graph = build_repo_graph(tmp_path).graph
+
+    assert graph.has_edge("main.run_agent", "pkg.tools.search")
+    assert graph.get_edge_data("main.run_agent", "pkg.tools.search")["kind"] == "calls"
+
+
+def test_build_repo_graph_resolves_cls_call_inside_a_classmethod(tmp_path: Path) -> None:
+    """`return cls(...)` in a classmethod is the most common aliased call
+    in real code -- the syntactic name is `cls`, but it resolves to the
+    enclosing class. The pass-2 pre-filter must let it through.
+    """
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "models.py").write_text(
+        "class Config:\n    @classmethod\n    def load(cls):\n        return cls()\n"
+    )
+
+    graph = build_repo_graph(tmp_path).graph
+
+    assert graph.has_edge("models.Config.load", "models.Config")
+    assert graph.get_edge_data("models.Config.load", "models.Config")["kind"] == "calls"
+
+
+def test_build_repo_graph_raises_when_the_deadline_has_already_passed(tmp_path: Path) -> None:
+    """An exceeded deadline must abort the whole build by raising, never
+    return a partially-built graph.
+
+    A partial graph is missing "calls" edges, which makes genuinely
+    reachable imports look unreachable -- exactly the false-positive class
+    that tells users to delete imports their code needs. All-or-nothing is
+    the only safe truncation policy, so the deadline surfaces as an
+    exception that callers degrade on, not as a smaller RepoGraph.
+    """
+    import time
+
+    from superrobot.pipeline.graph.builder import GraphBuildTimeout, build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query):\n    return query\n")
+    (tmp_path / "main.py").write_text(
+        "from pkg.tools import search\n\ndef run_agent():\n    return search('hi')\n"
+    )
+
+    with pytest.raises(GraphBuildTimeout):
+        build_repo_graph(tmp_path, deadline=time.monotonic() - 1.0)
+
+
+def test_build_repo_graph_with_a_generous_deadline_is_identical_to_no_deadline(
+    tmp_path: Path,
+) -> None:
+    """The deadline is a pure guard: a build that finishes inside its budget
+    must produce exactly the graph an unbounded build would, and the default
+    (`deadline=None`) must stay completely unbounded.
+    """
+    import time
+
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query):\n    return query\n")
+    (tmp_path / "main.py").write_text(
+        "from pkg.tools import search\n\ndef run_agent():\n    return search('hi')\n"
+    )
+
+    unbounded = build_repo_graph(tmp_path).graph
+    bounded = build_repo_graph(tmp_path, deadline=time.monotonic() + 3600.0).graph
+
+    assert set(unbounded.nodes) == set(bounded.nodes)
+    assert set(unbounded.edges) == set(bounded.edges)
+    # The edge the deadline check sits closest to -- pass 2's jedi loop.
+    assert unbounded.has_edge("main.run_agent", "pkg.tools.search")
