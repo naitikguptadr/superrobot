@@ -5,23 +5,43 @@ Priority order:
    and it resolves to a node already in the graph (most authoritative).
 2. What is actually invoked from an `if __name__ == "__main__":` guard,
    traced through the graph.
-3. None -- callers should fall back to the existing name/filename
-   heuristic scoring in superrobot.pipeline.scanner when this returns
-   None. Fully dynamic dispatch (getattr, plugin loaders, etc.) cannot
-   be resolved statically by any tool, graph-based or not.
+3. Name/filename heuristic scoring over the graph's own function nodes,
+   mirroring superrobot.pipeline.scanner's ENTRY_POINT_NAMES /
+   ENTRY_PRIORITY ranking (see `_resolve_by_heuristic`). This tier is
+   what makes the whole reachability layer apply to real agent repos:
+   they are libraries invoked by a framework, not CLIs, so the great
+   majority have neither a console script nor a `__main__` guard, and
+   without it every such repo resolved to None -- which
+   framework_detect.detect_framework() treats as "everything is
+   reachable", silently disabling call-graph-based analysis entirely.
+4. None -- fully dynamic dispatch (getattr, plugin loaders, etc.) cannot
+   be resolved statically by any tool, graph-based or not, and no
+   function in the repo is even named like an entry point.
 """
 
 from __future__ import annotations
 
 import ast
 import tomllib
+from pathlib import Path
 
 from superrobot.pipeline.graph.builder import (
     RepoGraph,
     code_object_node_id,
     iter_python_files,
     module_dotted_name,
+    strip_collision_suffix,
 )
+from superrobot.pipeline.scanner import ENTRY_POINT_NAMES, ENTRY_PRIORITY
+
+# Filenames scanner._rank_entry_points() rewards with a +20 bonus. Scanner
+# compares against the path RELATIVE to the repo root, so the bonus only
+# applies to a top-level main.py/app.py/etc, never to a nested
+# `pkg/sub/main.py` -- mirrored exactly here so the two rankings can't
+# disagree about the same repo.
+_ENTRY_FILENAME_BONUS_PATHS = frozenset({"main.py", "app.py", "__main__.py", "agent.py"})
+_ENTRY_FILENAME_BONUS = 20
+_RUN_PREFIX_BONUS = 10
 
 
 def resolve_entry_point(repo_graph: RepoGraph) -> str | None:
@@ -30,7 +50,11 @@ def resolve_entry_point(repo_graph: RepoGraph) -> str | None:
     if console_script_target is not None:
         return console_script_target
 
-    return _resolve_main_guard_call(repo_graph)
+    main_guard_target = _resolve_main_guard_call(repo_graph)
+    if main_guard_target is not None:
+        return main_guard_target
+
+    return _resolve_by_heuristic(repo_graph)
 
 
 def _resolve_console_script(repo_graph: RepoGraph) -> str | None:
@@ -83,6 +107,70 @@ def _resolve_main_guard_call(repo_graph: RepoGraph) -> str | None:
                     if candidate in repo_graph.graph:
                         return candidate
     return None
+
+
+def _resolve_by_heuristic(repo_graph: RepoGraph) -> str | None:
+    """Rank the graph's own function nodes the way scanner.py ranks the
+    entry-point candidates it collects, and return the best one.
+
+    Deliberately mirrors scanner._collect_entry_points' filter
+    (ENTRY_POINT_NAMES membership or a "run_" prefix) and
+    scanner._rank_entry_points' scoring (ENTRY_PRIORITY + filename bonus +
+    "run_" prefix bonus) so the graph-based path and scanner.py can never
+    disagree about which function looks most like an entry point.
+
+    The one part of scanner's score not reproduced is its +5 bonus for an
+    `async def`: the graph records only kind/path/line per node and tags
+    sync and async functions alike as kind="function", so async-ness isn't
+    recoverable here. It's a pure tie-breaker in scanner (smaller than
+    every other term), so omitting it can only change the outcome between
+    two candidates that already tie on name and file -- which the node-id
+    tie-break below resolves deterministically anyway.
+    """
+    candidates: list[tuple[int, str]] = []
+
+    for node_id, attrs in repo_graph.graph.nodes(data=True):
+        if attrs.get("kind") != "function":
+            continue
+        # The node id of a nested/method definition is qualified through
+        # its enclosing scopes ("mod.Class.run"), and may carry the
+        # module/function collision suffix -- strip that before taking the
+        # rightmost segment, or the local name would come out as "run:obj"
+        # and match nothing.
+        local_name = strip_collision_suffix(node_id).rsplit(".", 1)[-1]
+        if local_name not in ENTRY_POINT_NAMES and not local_name.startswith("run_"):
+            continue
+
+        score = ENTRY_PRIORITY.get(local_name, 0)
+        if _relative_path(repo_graph, attrs.get("path")) in _ENTRY_FILENAME_BONUS_PATHS:
+            score += _ENTRY_FILENAME_BONUS
+        if local_name.startswith("run_"):
+            score += _RUN_PREFIX_BONUS
+
+        candidates.append((score, node_id))
+
+    if not candidates:
+        return None
+    # Highest score wins; ties break on the node id itself, never on
+    # iteration order -- graph node order follows
+    # builder.iter_python_files' filesystem enumeration, so without an
+    # explicit tie-break the "winner" between two equally-scored
+    # candidates could differ between machines, or between runs on the
+    # same repo once an unrelated file is added.
+    return min(candidates, key=lambda candidate: (-candidate[0], candidate[1]))[1]
+
+
+def _relative_path(repo_graph: RepoGraph, path: str | None) -> str | None:
+    """Path of a node's defining file relative to the repo root, matching
+    what scanner.py scores its filename bonus against."""
+    if path is None:
+        return None
+    try:
+        return str(Path(path).relative_to(repo_graph.repo_root))
+    except ValueError:
+        # A graph reloaded from disk against a different repo_root (see
+        # RepoGraph.load) can hold paths outside it; just forgo the bonus.
+        return None
 
 
 def _is_main_guard(node: ast.If) -> bool:

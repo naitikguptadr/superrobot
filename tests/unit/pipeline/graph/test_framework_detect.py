@@ -155,21 +155,33 @@ def test_unknown_fallback_confidence_includes_entry_bonus(tmp_path: Path) -> Non
     +0.1 to the "unknown" base whenever any entry-point-shaped function
     exists -- regardless of whether a framework was found. Reproduce a repo
     with a function shaped like a real entry point (name "run_agent", in
-    ENTRY_POINT_NAMES), no framework import at all, and no resolvable
-    __main__ guard/console-script (so entry_point is None and the
-    "unknown" fallback path is hit). The graph-based path must apply the
-    exact same bonus as every other return path in detect_framework(),
-    landing on 0.3, not the previously-hardcoded 0.2.
+    ENTRY_POINT_NAMES) and no framework import at all, so the "unknown"
+    fallback path is hit. The graph-based path must apply the exact same
+    bonus as every other return path in detect_framework(), landing on
+    0.3, not the previously-hardcoded 0.2.
+
+    Checked on both of detect_framework's reachability modes, since the
+    bonus is computed differently in each: with a resolved entry point
+    (`reachable` is narrowed to the call graph, and run_agent has to be
+    found inside it) and with entry_point=None (`reachable` is empty and
+    every function node counts). This repo has no __main__ guard and no
+    console script, so its entry point comes from entry_points.py's
+    tier-3 name heuristic.
     """
     (tmp_path / "main.py").write_text("def run_agent():\n    return 1\n")
     repo_graph = build_repo_graph(tmp_path)
     entry = resolve_entry_point(repo_graph)
-    assert entry is None
+    assert entry == "main.run_agent"
 
     result = detect_framework(repo_graph, entry)
 
     assert result.framework == "unknown"
     assert result.confidence == pytest.approx(0.3)
+
+    unresolved_result = detect_framework(repo_graph, None)
+
+    assert unresolved_result.framework == "unknown"
+    assert unresolved_result.confidence == pytest.approx(0.3)
 
 
 def test_reachable_framework_tie_break_is_deterministic(tmp_path: Path) -> None:
