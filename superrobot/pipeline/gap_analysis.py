@@ -8,6 +8,7 @@ need explicit waiver." (shell/prompts/system.md)
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from superrobot.dr.platform_rules import (
@@ -17,6 +18,8 @@ from superrobot.dr.platform_rules import (
     validate_pyproject,
 )
 from superrobot.models.gap_result import GapFinding, GapReport
+
+logger = logging.getLogger(__name__)
 
 _FIXED_ENV_KEYS = {"PROMPT_TEMPLATE_ID", "DATAROBOT_ENDPOINT"}
 
@@ -90,7 +93,35 @@ def run_gap_analysis(package_dir: str | Path, source_repo: str | Path | None = N
                     )
                 )
 
+    if source_repo is not None:
+        findings.extend(_graph_findings(Path(source_repo)))
+
     return GapReport(findings=findings)
+
+
+def _graph_findings(source_repo: Path) -> list[GapFinding]:
+    """Graph-derived findings about the ORIGINAL repo the user wrote.
+
+    Deliberately runs against `source_repo`, never `package_dir`: an
+    unreachable framework import is a fact about the source the user
+    maintains, not about the generated DataRobot package (whose imports
+    SuperRobot itself wrote). Purely additive -- it appends findings and
+    never alters, reorders or suppresses any existing one.
+
+    Any failure is swallowed: the graph depends on jedi/networkx being able
+    to make sense of arbitrary user code, and `validate` must keep working
+    on repos the graph can't handle.
+    """
+    try:
+        from superrobot.pipeline.graph.builder import build_repo_graph
+        from superrobot.pipeline.graph.entry_points import resolve_entry_point
+        from superrobot.pipeline.graph.gap_analysis import check_unreachable_frameworks
+
+        repo_graph = build_repo_graph(source_repo)
+        return check_unreachable_frameworks(repo_graph, resolve_entry_point(repo_graph))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("graph gap-analysis checks skipped: %s", exc)
+        return []
 
 
 def _parse_runtime_keys(env_template: str) -> list[str]:
