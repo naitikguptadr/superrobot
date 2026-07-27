@@ -49,6 +49,111 @@ def test_flags_unreachable_framework_import_separately(tmp_path: Path) -> None:
     assert any("crewai" in warning for warning in result.unreachable_warnings)
 
 
+def test_framework_imported_two_hops_away_is_reachable(tmp_path: Path) -> None:
+    """Regression test: import reachability must be TRANSITIVE, not one hop.
+
+    Shape (the exact shape of tests/fixtures/langgraph_research_agent, which
+    this bug produced a user-visible false positive on):
+
+        main.run_agent  --calls-->  mod_b.step        (module mod_b)
+        mod_b           --imports-> mod_c
+        mod_c           --imports-> langgraph.graph
+
+    The old code seeded `reachable` with the modules defining reachable
+    functions (main, mod_b) and then added only those modules' *direct*
+    imports (mod_b, mod_c) -- stopping there. `langgraph.graph` is two
+    import hops from a call-reachable module, so it was wrongly reported as
+    an unreachable framework import, telling users to delete an import their
+    code genuinely executes at runtime. Note mod_b.step deliberately does
+    NOT call anything in mod_c: the only path to the framework is through
+    `imports` edges, so this exercises import-closure and nothing else.
+    """
+    (tmp_path / "mod_c.py").write_text(
+        "from langgraph.graph import StateGraph\n\ndef helper():\n    return StateGraph\n"
+    )
+    (tmp_path / "mod_b.py").write_text("import mod_c\n\ndef step():\n    return 1\n")
+    (tmp_path / "main.py").write_text(
+        "from mod_b import step\n\n"
+        "def run_agent():\n"
+        "    return step()\n\n"
+        "if __name__ == '__main__':\n"
+        "    run_agent()\n"
+    )
+    repo_graph = build_repo_graph(tmp_path)
+    entry = resolve_entry_point(repo_graph)
+
+    assert entry == "main.run_agent"
+
+    result = detect_framework(repo_graph, entry)
+
+    assert result.framework == "langgraph"
+    assert result.confidence >= 0.9
+    assert result.unreachable_warnings == []
+
+
+def test_type_checking_only_import_does_not_extend_reachability_transitively(
+    tmp_path: Path,
+) -> None:
+    """The transitive import closure must keep excluding TYPE_CHECKING-only
+    edges at EVERY hop, not just the first. An `if TYPE_CHECKING:`-guarded
+    import never executes, so nothing downstream of it executes either:
+    main imports mod_b only under TYPE_CHECKING, and mod_b imports mod_c
+    for real, so mod_c (and its crewai import) must stay outside the
+    closure. crewai's own import edge is a real one, so it is not filtered
+    by the type-checking-only node check -- only the closure can keep it
+    out.
+    """
+    (tmp_path / "mod_c.py").write_text(
+        "from crewai import Agent\n\ndef helper():\n    return Agent\n"
+    )
+    (tmp_path / "mod_b.py").write_text("import mod_c\n\ndef step():\n    return 1\n")
+    (tmp_path / "main.py").write_text(
+        "from typing import TYPE_CHECKING\n\n"
+        "if TYPE_CHECKING:\n"
+        "    import mod_b\n\n"
+        "from langgraph.graph import StateGraph\n\n"
+        "def run_agent():\n"
+        "    return StateGraph\n\n"
+        "if __name__ == '__main__':\n"
+        "    run_agent()\n"
+    )
+    repo_graph = build_repo_graph(tmp_path)
+    entry = resolve_entry_point(repo_graph)
+
+    result = detect_framework(repo_graph, entry)
+
+    assert result.framework == "langgraph"
+    assert any("crewai" in warning for warning in result.unreachable_warnings)
+
+
+def test_circular_imports_terminate(tmp_path: Path) -> None:
+    """Circular imports are legal Python and common in real repos. The
+    transitive closure must be a visited-set walk that terminates, not a
+    naive recursive descent that would recurse forever on the cycle. mod_a
+    and mod_b import each other; the framework sits behind the cycle, so
+    reaching it requires traversing into it.
+    """
+    (tmp_path / "mod_a.py").write_text("import mod_b\n\ndef a_helper():\n    return 1\n")
+    (tmp_path / "mod_b.py").write_text(
+        "import mod_a\nfrom langgraph.graph import StateGraph\n\n"
+        "def b_helper():\n    return StateGraph\n"
+    )
+    (tmp_path / "main.py").write_text(
+        "import mod_a\n\n"
+        "def run_agent():\n"
+        "    return 1\n\n"
+        "if __name__ == '__main__':\n"
+        "    run_agent()\n"
+    )
+    repo_graph = build_repo_graph(tmp_path)
+    entry = resolve_entry_point(repo_graph)
+
+    result = detect_framework(repo_graph, entry)
+
+    assert result.framework == "langgraph"
+    assert result.unreachable_warnings == []
+
+
 def test_detects_reachable_framework_with_nested_entry_point(tmp_path: Path) -> None:
     """Regression test: the entry point's containing module must be found via
     real 'defines' graph edges, not by naively splitting the entry point id on

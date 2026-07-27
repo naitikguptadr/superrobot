@@ -80,27 +80,17 @@ def detect_framework(repo_graph: RepoGraph, entry_point: str | None) -> Framewor
         reachable_functions = reachable_from(repo_graph, entry_point) | {entry_point}
         reachable |= reachable_functions
 
+        defining_modules: set[str] = set()
         for func_node in reachable_functions:
             # Find the function's real containing module via the reverse
             # `defines` edge (module --defines--> function), never by
             # string-splitting the node id -- entry points can be nested
             # (e.g. "pkg.sub.run_agent" lives in module "pkg.sub", not "pkg").
             for module_node, _, edge_attrs in graph.in_edges(func_node, data=True):
-                if edge_attrs.get("kind") != "defines":
-                    continue
-                reachable.add(module_node)
-                # A framework import only "counts" as reachable if it's
-                # actually imported by a module on the entry point's real
-                # call path, so pull in that module's `imports` targets too
-                # -- except edges tagged type_checking_only=True, which
-                # never execute (an `if TYPE_CHECKING:`-guarded import) and
-                # so must never make a module look reachable/in-use. Delegate
-                # to queries.imports_of() (with its type-checking-only
-                # exclusion flag) rather than reimplementing the edge filter
-                # inline.
-                reachable.update(
-                    imports_of(repo_graph, module_node, exclude_type_checking_only=True)
-                )
+                if edge_attrs.get("kind") == "defines":
+                    defining_modules.add(module_node)
+
+        reachable |= _transitive_imports(repo_graph, defining_modules)
 
     reachable_frameworks: set[str] = set()
     unreachable_frameworks: set[str] = set()
@@ -161,6 +151,39 @@ def detect_framework(repo_graph: RepoGraph, entry_point: str | None) -> Framewor
         )
 
     return FrameworkDetection(framework="unknown", confidence=min(1.0, 0.2 + entry_bonus))
+
+
+def _transitive_imports(repo_graph: RepoGraph, seed_modules: set[str]) -> set[str]:
+    """Return `seed_modules` plus everything reachable from them by following
+    `imports` edges to a fixpoint.
+
+    A framework import only "counts" as reachable if it's actually imported
+    -- directly or indirectly -- by a module on the entry point's real call
+    path. Import reachability is inherently transitive: if module A executes
+    `import B` and B executes `import langchain_core.tools`, then importing
+    A really does execute that framework import, so following only ONE hop
+    (A's direct imports) wrongly reports the framework as dead code.
+
+    Edges tagged type_checking_only=True are excluded at EVERY hop, not just
+    the first: an `if TYPE_CHECKING:`-guarded import never executes, so it
+    can't make its target reachable -- and therefore can't make anything
+    downstream of that target reachable either. queries.imports_of() applies
+    that filter for us, so the walk delegates to it per hop rather than
+    reimplementing the edge check.
+
+    This is a visited-set BFS rather than a recursive descent specifically so
+    circular imports (legal, and common in real repos) terminate instead of
+    recursing forever: a module already in `visited` is never expanded twice.
+    """
+    visited = set(seed_modules)
+    queue = list(seed_modules)
+    while queue:
+        module_node = queue.pop()
+        for imported in imports_of(repo_graph, module_node, exclude_type_checking_only=True):
+            if imported not in visited:
+                visited.add(imported)
+                queue.append(imported)
+    return visited
 
 
 def _pick_deterministic_winner(frameworks: set[str]) -> str:
