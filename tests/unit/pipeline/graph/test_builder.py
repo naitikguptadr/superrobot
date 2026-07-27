@@ -482,3 +482,80 @@ def test_build_repo_graph_resolves_call_edges_for_a_relative_repo_root(
 
     assert absolute_graph.graph.has_edge("main.run_agent", "pkg.tools.search")
     assert relative_graph.graph.has_edge("main.run_agent", "pkg.tools.search")
+
+
+def test_build_repo_graph_call_prefilter_keeps_repo_calls_and_ignores_stdlib_calls(
+    tmp_path: Path,
+) -> None:
+    """Pass 2 skips jedi inference for any called name that could not match
+    a graph node. Both halves of that pre-filter's contract are pinned
+    here: a call to a name that IS defined in the repo must still produce
+    its "calls" edge, and a call to a stdlib/unknown name must still
+    produce none -- the filter is a pure speedup, so the resulting edge set
+    has to be exactly what it was when every call site was inferred.
+    """
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query):\n    return query\n")
+    (tmp_path / "main.py").write_text(
+        "from pkg.tools import search\n\n"
+        "def run_agent(items):\n"
+        "    print(len(items))\n"
+        "    return search('hi')\n"
+    )
+
+    graph = build_repo_graph(tmp_path).graph
+
+    calls_from_run_agent = {
+        target
+        for _, target, data in graph.out_edges("main.run_agent", data=True)
+        if data.get("kind") == "calls"
+    }
+    # The in-repo call survives the pre-filter...
+    assert calls_from_run_agent == {"pkg.tools.search"}
+    # ...and the stdlib calls contribute nothing at all.
+    assert not graph.has_node("print")
+    assert not graph.has_node("len")
+
+
+def test_build_repo_graph_resolves_call_made_through_an_import_alias(tmp_path: Path) -> None:
+    """A call site can name its target through an alias, so the pass-2
+    pre-filter cannot key purely off the names of definitions in the repo.
+
+    `from pkg.tools import search as find` means the call reads `find(...)`
+    while the definition -- and therefore the graph node id -- is
+    `pkg.tools.search`. Filtering on the syntactic name alone would skip
+    the inference and silently drop this real edge.
+    """
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "tools.py").write_text("def search(query):\n    return query\n")
+    (tmp_path / "main.py").write_text(
+        "from pkg.tools import search as find\n\ndef run_agent():\n    return find('hi')\n"
+    )
+
+    graph = build_repo_graph(tmp_path).graph
+
+    assert graph.has_edge("main.run_agent", "pkg.tools.search")
+    assert graph.get_edge_data("main.run_agent", "pkg.tools.search")["kind"] == "calls"
+
+
+def test_build_repo_graph_resolves_cls_call_inside_a_classmethod(tmp_path: Path) -> None:
+    """`return cls(...)` in a classmethod is the most common aliased call
+    in real code -- the syntactic name is `cls`, but it resolves to the
+    enclosing class. The pass-2 pre-filter must let it through.
+    """
+    from superrobot.pipeline.graph.builder import build_repo_graph
+
+    (tmp_path / "models.py").write_text(
+        "class Config:\n    @classmethod\n    def load(cls):\n        return cls()\n"
+    )
+
+    graph = build_repo_graph(tmp_path).graph
+
+    assert graph.has_edge("models.Config.load", "models.Config")
+    assert graph.get_edge_data("models.Config.load", "models.Config")["kind"] == "calls"
