@@ -446,17 +446,29 @@ def deploy_cmd(
 
 
 def _resolve_credentials(config_dir: Path | None) -> tuple[str, str, SetupState | None]:
-    """Endpoint, token, and persisted SetupState — same resolution order as doctor."""
+    """Endpoint, token, and persisted SetupState — same resolution order as doctor.
+
+    An explicit `--config-dir` is an isolation boundary: when the caller names
+    a config directory, ambient `os.environ` credentials are deliberately NOT
+    consulted, so pointing at an empty directory reliably means "no
+    credentials". `setup.doctor` has always behaved this way; this function
+    used to fall through to `os.environ` regardless, which let credentials
+    leaked into the process (see `llm_gateway.ensure_credentials_loaded`)
+    silently satisfy an auth check the caller had scoped away.
+    """
     from superrobot.setup.config import load_env_file, load_state
 
     env = load_env_file(config_dir)
     state = load_state(config_dir)
+    scoped = config_dir is not None
     endpoint = (
         env.get("DATAROBOT_ENDPOINT")
         or (state.endpoint if state else "")
-        or os.environ.get("DATAROBOT_ENDPOINT", "")
+        or ("" if scoped else os.environ.get("DATAROBOT_ENDPOINT", ""))
     )
-    token = env.get("DATAROBOT_API_TOKEN") or os.environ.get("DATAROBOT_API_TOKEN", "")
+    token = env.get("DATAROBOT_API_TOKEN") or (
+        "" if scoped else os.environ.get("DATAROBOT_API_TOKEN", "")
+    )
     return endpoint, token, state
 
 
