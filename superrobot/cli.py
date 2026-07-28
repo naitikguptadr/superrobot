@@ -263,6 +263,9 @@ def generate_cmd(
     source: Annotated[str, typer.Argument(help="Local path or GitHub URL")],
     output_dir: Annotated[Path, typer.Option("--output-dir", "-o")],
     framework: Annotated[str | None, typer.Option("--framework")] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite existing files in --output-dir")
+    ] = False,
 ) -> None:
     """Stages 1–3 — write Agent App packaging into --output-dir."""
     from superrobot.engine.pipeline import TransformEngine
@@ -276,10 +279,15 @@ def generate_cmd(
             skip_eval=True,
             skip_deploy=True,
             framework=framework,
+            force=force,
         )
         console.print(f"[green]wrote[/] {len(ctx.files)} files → {ctx.output_dir}")
 
-    asyncio.run(_run())
+    try:
+        asyncio.run(_run())
+    except FileExistsError as exc:
+        console_err.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from exc
     raise typer.Exit(0)
 
 
@@ -290,6 +298,9 @@ def transform_cmd(
     skip_eval: Annotated[bool, typer.Option("--skip-eval")] = False,
     framework: Annotated[str | None, typer.Option("--framework")] = None,
     json_out: Annotated[bool, typer.Option("--json")] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite existing files in --output-dir")
+    ] = False,
 ) -> None:
     """Full brownfield transform (Scan → Analyze → Generate → Eval)."""
     from superrobot.engine.pipeline import TransformEngine
@@ -303,6 +314,7 @@ def transform_cmd(
             skip_eval=skip_eval,
             skip_deploy=True,
             framework=framework,
+            force=force,
         )
         payload = {
             "repo_path": ctx.repo_path,
@@ -317,7 +329,14 @@ def transform_cmd(
         else:
             console.print(f"[green]transform complete[/] files={len(ctx.files)} → {ctx.output_dir}")
 
-    asyncio.run(_run())
+    try:
+        asyncio.run(_run())
+    except FileExistsError as exc:
+        if json_out:
+            console.print_json(json.dumps({"error": str(exc)}))
+        else:
+            console_err.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from exc
     raise typer.Exit(0)
 
 
