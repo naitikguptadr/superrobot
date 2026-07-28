@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 from rich.console import Console
@@ -406,6 +406,17 @@ def deploy_cmd(
         list[str] | None,
         typer.Option("--secret", help="KEY=credential:<id> (workload target, repeatable)"),
     ] = None,
+    source: Annotated[
+        Path | None,
+        typer.Option(
+            "--source",
+            help=(
+                "Original repo the package was generated from, so Gap Analysis can run "
+                "its dependency and reachability rules. Inferred automatically when the "
+                "package is a <repo>/.superrobot directory."
+            ),
+        ),
+    ] = None,
     waive: Annotated[
         bool, typer.Option("--waive", help="Proceed despite blocking Gap Analysis findings")
     ] = False,
@@ -426,7 +437,12 @@ def deploy_cmd(
         raise typer.Exit(
             asyncio.run(
                 _deploy_agent_app(
-                    path, has_ui=has_ui, waive=waive, config_dir=config_dir, json_out=json_out
+                    path,
+                    has_ui=has_ui,
+                    waive=waive,
+                    config_dir=config_dir,
+                    json_out=json_out,
+                    source_repo=source,
                 )
             )
         )
@@ -440,6 +456,7 @@ def deploy_cmd(
                 waive=waive,
                 config_dir=config_dir,
                 json_out=json_out,
+                source_repo=source,
             )
         )
     )
@@ -528,6 +545,47 @@ def _record_receipt(
     save_receipt(receipt, config_dir)
 
 
+def _record_receipt_safely(**kwargs: Any) -> None:
+    """Write a deploy receipt without letting bookkeeping undo the deploy.
+
+    `_record_receipt` runs *after* the platform has already been mutated, so
+    an exception here (unwritable config dir, full disk, a `--config-dir`
+    typo landing on a file) used to escape uncaught: stdout said the deploy
+    succeeded, the process exited 1, and no receipt existed -- so CI would
+    retry a deploy that had already landed.
+
+    The failure is still reported, because losing the audit trail matters;
+    it just no longer changes the outcome of the deploy itself.
+    """
+    try:
+        _record_receipt(**kwargs)
+    except Exception as exc:  # noqa: BLE001 - never let bookkeeping fail a deploy
+        console_err.print(
+            f"[yellow]![/] Deploy completed but the receipt could not be written: {exc}"
+        )
+
+
+def _resolve_source_repo(path: Path, explicit: Path | None) -> Path | None:
+    """Locate the repo a generated package came from.
+
+    Gap Analysis' dependency rule and its graph checks only run when they can
+    see the original repo. `validate` takes `--source`; the deploy gate used
+    to pass nothing at all, which silently disabled the only *blocking*
+    dependency rule -- so a package `validate` refused would deploy clean.
+
+    `generate`/`transform` write to `<repo>/.superrobot` by default, so the
+    parent of a `.superrobot` package is the source repo. Inferring that
+    makes the common case correct without the user having to know to pass a
+    flag; an explicit value always wins.
+    """
+    if explicit is not None:
+        return explicit
+    resolved = path.resolve()
+    if resolved.name == ".superrobot" and (resolved.parent / "pyproject.toml").is_file():
+        return resolved.parent
+    return None
+
+
 def _gap_gate(
     path: Path,
     *,
@@ -535,6 +593,7 @@ def _gap_gate(
     json_out: bool,
     target: str,
     config_dir: Path | None,
+    source_repo: Path | None = None,
     image_uri: str | None = None,
     artifact_id: str | None = None,
     has_ui: bool = False,
@@ -543,7 +602,7 @@ def _gap_gate(
     """Run Gap Analysis; print findings; record+return None if deploy is blocked."""
     from superrobot.pipeline.gap_analysis import run_gap_analysis
 
-    report = run_gap_analysis(path)
+    report = run_gap_analysis(path, source_repo=_resolve_source_repo(path, source_repo))
     if report.blocking and not waive:
         if json_out:
             console.print_json(
@@ -585,6 +644,7 @@ async def _deploy_agent_app(
     waive: bool,
     config_dir: Path | None,
     json_out: bool,
+    source_repo: Path | None = None,
     replaces: str | None = None,
 ) -> int:
     from superrobot.pipeline.deployer import DEPLOY_WARNINGS, deploy
@@ -595,6 +655,7 @@ async def _deploy_agent_app(
         json_out=json_out,
         target="agent-app",
         config_dir=config_dir,
+        source_repo=source_repo,
         has_ui=has_ui,
         replaces=replaces,
     )
@@ -623,7 +684,7 @@ async def _deploy_agent_app(
         console.print("[green]deploy succeeded[/]")
     else:
         console.print(f"[red]deploy failed[/] {result.error_message or ''}")
-    _record_receipt(
+    _record_receipt_safely(
         target="agent-app",
         action="deployed" if result.success else "failed",
         success=result.success,
@@ -647,6 +708,7 @@ async def _deploy_workload(
     waive: bool,
     config_dir: Path | None,
     json_out: bool,
+    source_repo: Path | None = None,
     replaces: str | None = None,
 ) -> int:
     from superrobot.pipeline.workload_deployer import deploy_workload
@@ -682,6 +744,7 @@ async def _deploy_workload(
         json_out=json_out,
         target="workload",
         config_dir=config_dir,
+        source_repo=source_repo,
         image_uri=image_uri,
         artifact_id=artifact_id,
         replaces=replaces,
@@ -710,7 +773,7 @@ async def _deploy_workload(
         console.print(f"[green]workload {result.action}[/] id={result.workload_id}")
     else:
         console.print(f"[red]workload deploy failed[/] {result.error_message or ''}")
-    _record_receipt(
+    _record_receipt_safely(
         target="workload",
         action=result.action or "failed",
         success=result.success,
