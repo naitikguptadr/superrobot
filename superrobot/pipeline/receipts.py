@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from superrobot.models.receipt import Receipt
 from superrobot.setup.config import config_dir
+
+# Receipt ids are generated as `uuid4().hex[:12]`, so a strict alphanumeric
+# form is the whole legitimate space. Validating against it keeps a
+# user-supplied id from escaping the receipts directory.
+_RECEIPT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 _DIAGNOSTICS: list[tuple[str, str]] = [
     (
@@ -40,20 +46,38 @@ def _receipts_dir(root: str | Path | None = None) -> Path:
     return config_dir(root) / "receipts"
 
 
+def _validated_receipt_id(receipt_id: str) -> str:
+    """Reject an id that could escape the receipts directory.
+
+    `receipt show|diagnose|replace` take this straight from the command line
+    and it used to be interpolated into a path unchecked, so
+    `receipt show ../../secret` read an arbitrary JSON file and a crafted
+    `Receipt.id` wrote outside the store.
+    """
+    if not _RECEIPT_ID_RE.match(receipt_id):
+        msg = (
+            f"Invalid receipt id {receipt_id!r} — expected 1-64 characters of "
+            "letters, digits, dash or underscore."
+        )
+        raise ValueError(msg)
+    return receipt_id
+
+
 def save_receipt(receipt: Receipt, root: str | Path | None = None) -> Path:
     """Persist a receipt as JSON. No secrets are ever included on the model."""
+    receipt_id = _validated_receipt_id(receipt.id)
     directory = _receipts_dir(root)
     directory.mkdir(parents=True, exist_ok=True)
-    destination = directory / f"{receipt.id}.json"
-    destination.write_text(receipt.model_dump_json(indent=2) + "\n")
+    destination = directory / f"{receipt_id}.json"
+    destination.write_text(receipt.model_dump_json(indent=2) + "\n", encoding="utf-8")
     return destination
 
 
 def load_receipt(receipt_id: str, root: str | Path | None = None) -> Receipt | None:
-    path = _receipts_dir(root) / f"{receipt_id}.json"
+    path = _receipts_dir(root) / f"{_validated_receipt_id(receipt_id)}.json"
     if not path.is_file():
         return None
-    return Receipt.model_validate_json(path.read_text())
+    return Receipt.model_validate_json(path.read_text(encoding="utf-8"))
 
 
 def list_receipts(root: str | Path | None = None, *, target: str | None = None) -> list[Receipt]:

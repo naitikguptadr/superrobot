@@ -353,7 +353,7 @@ def validate_cmd(
     from superrobot.pipeline.gap_analysis import run_gap_analysis
 
     if not path.is_dir():
-        console.print(f"[red]Not a directory[/] {path}")
+        _emit_error(f"Not a directory: {path}", json_out=json_out)
         raise typer.Exit(2)
 
     report = run_gap_analysis(path, source_repo=source)
@@ -425,12 +425,10 @@ def deploy_cmd(
 ) -> None:
     """Deploy generated packaging to DataRobot Agent App or the Workload API."""
     if target not in {"agent-app", "workload"}:
-        console.print(
-            f"[red]Unsupported target[/] {target!r} — use [cyan]agent-app[/] or [cyan]workload[/]"
-        )
+        _emit_error(f"Unsupported target {target!r} — use agent-app or workload", json_out=json_out)
         raise typer.Exit(2)
     if not path.is_dir():
-        console.print(f"[red]Not a directory[/] {path}")
+        _emit_error(f"Not a directory: {path}", json_out=json_out)
         raise typer.Exit(2)
 
     if target == "agent-app":
@@ -543,6 +541,24 @@ def _record_receipt(
         has_ui=has_ui,
     )
     save_receipt(receipt, config_dir)
+
+
+def _emit_error(message: str, *, json_out: bool) -> None:
+    """Report a failure without breaking `--json`.
+
+    Under `--json`, stdout must be a single valid JSON document -- the Pi
+    shell parses it, so a Rich-rendered error line printed before the JSON
+    branch surfaced to users as a parse failure rather than the actual
+    problem ("Not authenticated" and the like).
+
+    Human-readable output deliberately stays on stdout, where it has always
+    been. Moving it to stderr would be defensible on Unix convention, but
+    that is a separate UX change from the JSON-purity bug this exists to fix.
+    """
+    if json_out:
+        console.print_json(json.dumps({"error": message}))
+    else:
+        console.print(f"[red]{message}[/]")
 
 
 def _record_receipt_safely(**kwargs: Any) -> None:
@@ -714,22 +730,23 @@ async def _deploy_workload(
     from superrobot.pipeline.workload_deployer import deploy_workload
 
     if bool(image_uri) == bool(artifact_id):
-        console.print(
-            "[red]Exactly one of --image-uri or --artifact-id is required for --target workload[/]"
+        _emit_error(
+            "Exactly one of --image-uri or --artifact-id is required for --target workload",
+            json_out=json_out,
         )
         return 2
 
     secret_map: dict[str, str] = {}
     for item in secrets or []:
         if "=" not in item:
-            console.print(f"[red]Invalid --secret[/] {item!r} — expected KEY=VALUE")
+            _emit_error(f"Invalid --secret {item!r} — expected KEY=VALUE", json_out=json_out)
             return 2
         key, value = item.split("=", maxsplit=1)
         secret_map[key] = value
 
     endpoint, token, state = _resolve_credentials(config_dir)
     if not endpoint or not token:
-        console.print("[red]Not authenticated[/] — run [cyan]superrobot setup[/]")
+        _emit_error("Not authenticated — run `superrobot setup`", json_out=json_out)
         return 1
     if not state or not state.capabilities.workload:
         console.print(
@@ -804,7 +821,7 @@ def memory_ensure_cmd(
 
     endpoint, token, state = _resolve_credentials(config_dir)
     if not endpoint or not token:
-        console.print("[red]Not authenticated[/] — run [cyan]superrobot setup[/]")
+        _emit_error("Not authenticated — run `superrobot setup`", json_out=json_out)
         raise typer.Exit(1)
     if not state or not state.capabilities.memory:
         console.print(
@@ -911,7 +928,7 @@ def receipt_diagnose_cmd(
 
     receipt = load_receipt(receipt_id, config_dir)
     if receipt is None:
-        console.print(f"[red]No such receipt[/] {receipt_id!r}")
+        _emit_error(f"No such receipt: {receipt_id!r}", json_out=json_out)
         raise typer.Exit(1)
     fix = diagnose(receipt)
     if json_out:
@@ -939,7 +956,7 @@ def receipt_replace_cmd(
 
     receipt = load_receipt(receipt_id, config_dir)
     if receipt is None:
-        console.print(f"[red]No such receipt[/] {receipt_id!r}")
+        _emit_error(f"No such receipt: {receipt_id!r}", json_out=json_out)
         raise typer.Exit(1)
     if not receipt.manifest_dir:
         console.print("[red]Receipt has no manifest_dir recorded — cannot replay[/]")

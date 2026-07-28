@@ -17,6 +17,10 @@ def test_finds_shell_entry_by_walking_up_from_a_nested_file(tmp_path: Path) -> N
     shell_entry = repo_root / "shell" / "dist" / "cli.js"
     shell_entry.parent.mkdir(parents=True)
     shell_entry.write_text("// stub")
+    # The ancestor walk only accepts a directory that looks like a project
+    # root, so an untrusted repo that merely contains shell/dist/cli.js can't
+    # hijack the launcher (see find_shell_entry / audit C19).
+    (repo_root / "pyproject.toml").write_text("[project]\nname='superrobot'\n")
 
     found = find_shell_entry(start=nested_source)
     assert found == shell_entry
