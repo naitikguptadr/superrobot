@@ -63,11 +63,13 @@ class TransformEngine:
         scan_result: ScanResult,
         analysis: AnalysisResult,
         output_dir: str | Path,
+        *,
+        force: bool = False,
     ) -> tuple[Path, dict[str, str]]:
         self._emit("generate", str(output_dir))
         config = generate_config(scan_result, analysis)
         files = render_files(config)
-        out = write_generated_files(files, output_dir)
+        out = write_generated_files(files, output_dir, force=force)
         return out, files
 
     async def run_eval(
@@ -92,12 +94,21 @@ class TransformEngine:
         skip_deploy: bool = True,
         skip_clone: bool = False,
         framework: str | None = None,
+        force: bool = False,
     ) -> TransformContext:
-        """Run the full brownfield pipeline and return accumulated context."""
+        """Run the full brownfield pipeline and return accumulated context.
+
+        `force` only governs a caller-supplied `output_dir`. When we pick the
+        destination ourselves it is `<repo>/.superrobot`, a directory this
+        tool owns, so re-running a migration there is expected and overwrites
+        without complaint. An explicit `-o` may point anywhere -- including
+        the source repo -- so it is guarded unless the caller opts in.
+        """
         if skip_clone and Path(source).exists():
             repo_path = source
         else:
             repo_path = await self.resolve_source(source)
+        tool_owned_output = output_dir is None
         out = Path(output_dir or Path(repo_path) / ".superrobot")
 
         ctx = TransformContext(repo_path=repo_path, output_dir=out)
@@ -111,7 +122,9 @@ class TransformEngine:
             ctx.analysis.notes = f"Framework forced via --framework={framework}. " + (
                 ctx.analysis.notes or ""
             )
-        written, ctx.files = self.run_generate(ctx.scan, ctx.analysis, out)
+        written, ctx.files = self.run_generate(
+            ctx.scan, ctx.analysis, out, force=force or tool_owned_output
+        )
 
         if not skip_eval:
             ctx.eval_summary = await self.run_eval(ctx.analysis, written, entry=ctx.entry_info)

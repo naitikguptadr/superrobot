@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import logging
 import re
+import tomllib
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -35,6 +37,12 @@ DR_BASE_REQUIREMENTS = [
     "openai",
     "pydantic>=2.0",
 ]
+
+logger = logging.getLogger(__name__)
+
+# Leading distribution name of a PEP 508 requirement, i.e. everything before
+# an extras bracket, a version operator, or an environment marker.
+_REQUIREMENT_NAME_RE = re.compile(r"^\s*([A-Za-z0-9._-]+)")
 
 
 def _env() -> Environment:
@@ -274,13 +282,37 @@ def render_files(config: AgentConfig) -> dict[str, str]:
     return files
 
 
-def write_generated_files(files: dict[str, str], output_dir: str | Path) -> Path:
-    """Write generated files to output directory."""
+def write_generated_files(
+    files: dict[str, str], output_dir: str | Path, *, force: bool = False
+) -> Path:
+    """Write generated files to `output_dir`.
+
+    Refuses to clobber existing files unless `force=True`. Previously this
+    overwrote whatever was already there with no check and no prompt, so
+    pointing `-o` at a non-empty directory silently destroyed its contents --
+    and `-o .` destroyed the source repo's own pyproject.toml, the very file
+    the `pyproject-removal` rule exists to protect.
+
+    All conflicts are detected before anything is written, so a refusal never
+    leaves a half-written package behind.
+    """
     out = Path(output_dir).resolve()
+
+    if not force:
+        conflicts = sorted(rel for rel in files if (out / rel).exists())
+        if conflicts:
+            shown = ", ".join(conflicts[:5])
+            more = f" (+{len(conflicts) - 5} more)" if len(conflicts) > 5 else ""
+            msg = (
+                f"Refusing to overwrite {len(conflicts)} existing file(s) in {out}: "
+                f"{shown}{more}. Pass force=True (CLI: --force) to overwrite."
+            )
+            raise FileExistsError(msg)
+
     for rel_path, content in files.items():
         dest = out / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(content)
+        dest.write_text(content, encoding="utf-8")
     return out
 
 
@@ -291,14 +323,87 @@ def apply_fix(suggestion: str, config: AgentConfig) -> dict[str, str]:
     return render_files(config)
 
 
+def _requirement_name(requirement: str) -> str:
+    """Normalized distribution name for a PEP 508 requirement string.
+
+    `langgraph>=0.2.0` -> `langgraph`; `uvicorn[standard]>=1` -> `uvicorn`;
+    `httpx ; python_version < "3.12"` -> `httpx`. Used only for dedupe, so
+    the result is lowercased with `_` folded to `-` per PEP 503.
+    """
+    match = _REQUIREMENT_NAME_RE.match(requirement)
+    return match.group(1).lower().replace("_", "-") if match else ""
+
+
+def _original_dependencies(original_pyproject: str) -> list[str]:
+    """Dependencies declared by the user's own pyproject.toml.
+
+    Parses the TOML instead of scanning lines. The previous line-scanning
+    approach treated every non-comment, non-table line as a package name, so
+    an ordinary multi-line `dependencies` array contributed a bare `]` --
+    along with `name = "..."`, `version = "..."` and every other metadata
+    line. That `]` then truncated `platform_rules._extract_dependencies`'
+    non-greedy regex, so `validate_pyproject` concluded every original
+    package had been removed and aborted the run. Net effect: any repo with
+    a normal pyproject.toml failed to migrate at all.
+
+    Returns [] rather than raising on unparseable input -- a malformed
+    pyproject should degrade the dependency merge, not kill the migration.
+    """
+    if not original_pyproject.strip():
+        return []
+    try:
+        parsed = tomllib.loads(original_pyproject)
+    except tomllib.TOMLDecodeError:
+        logger.debug("original pyproject.toml is not valid TOML; skipping dependency merge")
+        return []
+
+    found: list[str] = []
+
+    project = parsed.get("project")
+    if isinstance(project, dict):
+        declared = project.get("dependencies")
+        if isinstance(declared, list):
+            found.extend(dep for dep in declared if isinstance(dep, str))
+
+    # Poetry declares dependencies as a table of name -> constraint, and pins
+    # the interpreter as a `python` entry that is not a distribution.
+    tool = parsed.get("tool")
+    poetry = tool.get("poetry") if isinstance(tool, dict) else None
+    if isinstance(poetry, dict):
+        poetry_deps = poetry.get("dependencies")
+        if isinstance(poetry_deps, dict):
+            found.extend(name for name in poetry_deps if name.lower() != "python")
+
+    return found
+
+
 def _merge_dependencies(detected: list[str], original_pyproject: str) -> list[str]:
-    merged: set[str] = set(DR_BASE_REQUIREMENTS)
-    merged.update(detected)
-    if original_pyproject:
-        for line in original_pyproject.splitlines():
-            stripped = line.strip().strip(",").strip('"').strip("'")
-            if stripped and not stripped.startswith("#") and not stripped.startswith("["):
-                pkg = stripped.split(">=")[0].split("==")[0]
-                if pkg and pkg not in ("dependencies", "="):
-                    merged.add(pkg)
-    return sorted(merged)
+    """Combine DataRobot's base requirements, scanned imports, and the repo's
+    own declared dependencies into one deduplicated list.
+
+    Dedupe is by normalized distribution name, so `langgraph` and
+    `langgraph>=0.2.0` collapse to one entry -- and the variant carrying a
+    version constraint wins, so the user's pins reach the generated package
+    instead of being flattened to a bare name.
+    """
+    merged: dict[str, str] = {}
+
+    def add(requirement: str) -> None:
+        requirement = requirement.strip()
+        name = _requirement_name(requirement)
+        if not name:
+            return
+        existing = merged.get(name)
+        # Keep the first entry seen, except upgrade a bare name to a
+        # constrained one (`pydantic` -> `pydantic>=2.0`).
+        if existing is None or (existing == name and requirement != name):
+            merged[name] = requirement
+
+    for requirement in DR_BASE_REQUIREMENTS:
+        add(requirement)
+    for requirement in detected:
+        add(requirement)
+    for requirement in _original_dependencies(original_pyproject):
+        add(requirement)
+
+    return sorted(merged.values())
