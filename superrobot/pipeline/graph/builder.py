@@ -144,6 +144,28 @@ def iter_python_files(repo_root: Path) -> list[Path]:
     ]
 
 
+def parse_python_modules(repo_root: Path) -> dict[Path, ast.Module]:
+    """Parse every Python file under repo_root into an ast.Module.
+
+    Unparseable/unreadable files are skipped rather than aborting the whole
+    parse: a single vendored file with Python-2 syntax must not cost us the
+    analysis of every other file in the repo.
+
+    Factored out of `build_repo_graph`'s pass 0 so that later analyses
+    (dataflow, probes) parse the repo exactly the way the graph builder did
+    -- same file-exclusion rules, same encoding fallback, same skip
+    behavior -- instead of each re-deriving a subtly different corpus.
+    """
+    trees: dict[Path, ast.Module] = {}
+    for py_file in iter_python_files(repo_root):
+        try:
+            source = py_file.read_text(encoding="utf-8", errors="replace")
+            trees[py_file] = ast.parse(source, filename=str(py_file))
+        except (SyntaxError, UnicodeDecodeError, OSError):
+            continue
+    return trees
+
+
 @dataclass
 class RepoGraph:
     """A whole-repo code graph plus the root it was built from."""
@@ -361,8 +383,6 @@ def build_repo_graph(repo_root: Path, *, deadline: float | None = None) -> RepoG
     # silently drop the entire cross-file call graph, with no error.
     repo_root = Path(repo_root).resolve()
     graph = nx.DiGraph()
-    py_files = iter_python_files(repo_root)
-    file_asts: dict[Path, ast.Module] = {}
     module_names: dict[Path, str] = {}
 
     # Pass 0: parse every file and register its module node up front,
@@ -372,14 +392,8 @@ def build_repo_graph(repo_root: Path, *, deadline: float | None = None) -> RepoG
     # must be order-independent (not depend on which file rglob() happens
     # to yield first), so every real module has to already exist in the
     # graph before any function/class id is computed.
-    for py_file in py_files:
-        try:
-            source = py_file.read_text(encoding="utf-8", errors="replace")
-            tree = ast.parse(source, filename=str(py_file))
-        except (SyntaxError, UnicodeDecodeError, OSError):
-            continue
-
-        file_asts[py_file] = tree
+    file_asts = parse_python_modules(repo_root)
+    for py_file in file_asts:
         mod_name = module_dotted_name(py_file, repo_root)
         module_names[py_file] = mod_name
         graph.add_node(mod_name, kind="module", path=str(py_file))
