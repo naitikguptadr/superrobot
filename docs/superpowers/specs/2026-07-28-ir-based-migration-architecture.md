@@ -54,7 +54,7 @@ Concretely, reaching-definitions answers what regex cannot:
 ```python
 CLS = ChatOpenAI
 model = cfg["model"]
-llm = CLS(model=model)      # what actually reaches model= ?
+llm = CLS(model=model)  # what actually reaches model= ?
 ```
 
 The same machinery answers which env vars reach a network call (secret handling), what reaches a prompt (prompt provenance), and which functions perform I/O (tool detection).
