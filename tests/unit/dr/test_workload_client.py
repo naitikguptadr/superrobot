@@ -39,14 +39,19 @@ def test_create_posts_manifest_and_returns_body() -> None:
     assert result["id"] == "w-2"
 
 
-def test_replace_patches_by_id() -> None:
+def test_replace_rolls_onto_the_new_artifact() -> None:
+    """Previously asserted `PATCH /workloads/{id}/`, which DataRobot
+    documents as metadata-only -- so this test was pinning the bug that made
+    every redeploy silently keep serving the old image. See audit C2.
+    """
+
     async def transport(method: str, url: str, headers: dict[str, str], payload: object | None):
-        assert method == "PATCH"
-        assert url.endswith("/workloads/w-1/")
-        return 200, {"id": "w-1", "name": "research-agent"}
+        assert method == "POST"
+        assert url.endswith("/workloads/w-1/replacement/")
+        return 202, {"id": "w-1", "name": "research-agent"}
 
     client = WorkloadClient("https://app.datarobot.com", "tok", transport=transport)
-    result = asyncio.run(client.replace("w-1", {"name": "research-agent"}))
+    result = asyncio.run(client.replace("w-1", {"name": "research-agent", "artifactId": "art-1"}))
     assert result["id"] == "w-1"
 
 
