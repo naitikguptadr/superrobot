@@ -11,12 +11,16 @@ constructor out literally at the call site.
 
 Two ways a call is recognized
 -----------------------------
-1. **Known** (`known=True`): the resolved callable is one of
-   `engine.providers.LLM_CLIENT_SHIMS`, so we have a gateway shim for it.
-2. **Unknown** (`known=False`): it matches an open heuristic below. We
-   have no shim, but the ledger must still see it -- a provider that is
-   silently skipped is a broken migration; a provider that is over-reported
-   is one line in a review.
+1. **Known** (`known=True`): `probes.providers.resolve_provider` named the
+   provider, from the module the call resolves into or from a constructor
+   we have an explicit entry for. This no longer has anything to do with
+   having a shim -- under the IR architecture we recompile onto DataRobot's
+   recipe rather than rewriting source, so the question that matters is
+   "can we name the provider and the model?", not "do we have a shim?".
+2. **Unknown** (`known=False`): no provider could be named, but the call
+   matches an open heuristic below. The ledger must still see it -- a
+   provider that is silently skipped is a broken migration; a provider that
+   is over-reported is one line in a review.
 
 The unknown-provider heuristic catches
 --------------------------------------
@@ -44,17 +48,22 @@ The unknown-provider heuristic catches
   of a literal config dict too, so AutoGen's
   `llm_config={"model": "gpt-4o"}` resolves.
 
+The implicit-default-model case
+-------------------------------
+CrewAI's `Agent(role=..., goal=...)` and LlamaIndex's
+`index.as_query_engine()` call a model that is named nowhere at the call
+site -- the framework supplies its own default from the environment or a
+global `Settings`. That is still a migratable fact, and the loudest one:
+the target recipe must be told a model explicitly, so an invisible default
+is exactly what must not stay invisible. These produce a call site with
+`model=None` and `implicit_model=True`, driven by
+`providers.IMPLICIT_MODEL_CLIENTS`.
+
 It deliberately does NOT catch
 ------------------------------
 * calls through a value we cannot name at all (`get_client()(...)`,
   `handlers[key](...)`): there is no callee name to classify. Interprocedural
   resolution is a Phase 2 non-goal, so these are invisible to this probe.
-* a framework's *implicit* default LLM, where no model appears in the source
-  at all: CrewAI's `Agent(role=..., goal=...)` and LlamaIndex's
-  `index.as_query_engine()` both call a model configured by environment or
-  global `Settings`. There is no call-site fact to find; establishing these
-  is a framework-knowledge question for Layer 3, and the coverage ledger
-  should treat a framework-shaped repo with zero call sites as suspicious.
 * prompt/message types whose names merely start with `Chat`
   (`ChatPromptTemplate`, `ChatMessage`, ...) -- see `_NOT_CLIENTS`. These
   are still reported if they are known shims, and still reported if a model
@@ -70,7 +79,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 
-from superrobot.engine.providers import LLM_CLIENT_SHIMS, PROVIDER_IMPORT_PREFIXES
+from superrobot.engine.providers import PROVIDER_IMPORT_PREFIXES
 from superrobot.pipeline.graph.builder import RepoGraph
 from superrobot.pipeline.graph.dataflow import (
     ModuleContext,
@@ -79,6 +88,7 @@ from superrobot.pipeline.graph.dataflow import (
     resolve_call_parameter,
     resolve_callee_name,
 )
+from superrobot.pipeline.probes.providers import IMPLICIT_MODEL_CLIENTS, resolve_provider
 
 # Parameter names that carry the model identity, in the order we trust them.
 # Different SDKs spell it differently and getting this wrong means reporting
@@ -225,6 +235,23 @@ class LlmCallSite:
     their own name, positional arguments under `arg0`, `arg1`, ... and a
     `**` unpacking under `**`. Each value is the statically-resolved value
     where one exists, otherwise the source expression.
+
+    `provider` is the logical provider this site talks to (`"openai"`,
+    `"bedrock"`, `"crewai"`), resolved by `probes.providers.resolve_provider`
+    from the module the call resolves into, falling back to the constructor
+    name. None means we could not name it.
+
+    `known` means **we recognized this client and resolved its provider** --
+    that is, `provider is not None`. It does *not* mean we have a shim for
+    it: shims belonged to the old rewrite-the-source approach, and under the
+    IR architecture we recompile onto DataRobot's recipe instead. A site with
+    `known=False` is still reported, with `provider=None` marking the gap for
+    the coverage ledger to block on.
+
+    `implicit_model` is True when this construct will call a model but names
+    none, so the framework's default applies (CrewAI's `Agent`, LlamaIndex's
+    `as_query_engine`). `model` is None in that case by definition, and the
+    migration must supply a model explicitly.
     """
 
     client: str
@@ -232,12 +259,14 @@ class LlmCallSite:
     known: bool
     site: Site
     params: dict[str, str] = field(default_factory=dict)
+    provider: str | None = None
+    implicit_model: bool = False
 
 
 def find_llm_call_sites(repo_graph: RepoGraph) -> list[LlmCallSite]:
     """Every LLM call site in the repo, in file/line order.
 
-    Includes providers we have no shim for (`known=False`) precisely so the
+    Includes providers we could not name (`known=False`) precisely so the
     coverage ledger can block on them instead of a migration quietly
     shipping without them.
     """
@@ -250,23 +279,26 @@ def find_llm_call_sites(repo_graph: RepoGraph) -> list[LlmCallSite]:
             if callee is None:
                 continue
             client = callee.rsplit(".", 1)[-1]
-            known = client in LLM_CLIENT_SHIMS
-            if not known and not _looks_like_an_llm_call(callee, client, node):
+            provider = resolve_provider(callee, client)
+            if provider is None and not _looks_like_an_llm_call(callee, client, node):
                 continue
+            model = _resolve_model(module, node)
             sites.append(
                 LlmCallSite(
                     client=client,
-                    model=_resolve_model(module, node),
-                    known=known,
+                    model=model,
+                    known=provider is not None,
                     site=module.site_for(node),
                     params=_call_params(module, node),
+                    provider=provider,
+                    implicit_model=model is None and client in IMPLICIT_MODEL_CLIENTS,
                 )
             )
     return sorted(sites, key=lambda s: (s.site.file, s.site.line, s.client))
 
 
 def _looks_like_an_llm_call(callee: str, client: str, call: ast.Call) -> bool:
-    """The open heuristic for providers we have no shim for.
+    """The open heuristic for call sites whose provider we could not name.
 
     Tuned to over-report rather than under-report: see the module docstring
     for exactly what it does and does not catch.
@@ -314,7 +346,18 @@ def _resolve_model(module: ModuleContext, call: ast.Call) -> str | None:
         if len(values.resolved) == 1:
             return values.resolved[0]
         return None
-    return _model_from_config_dict(call)
+    return _model_from_config_string(module, call) or _model_from_config_dict(call)
+
+
+def _model_from_config_string(module: ModuleContext, call: ast.Call) -> str | None:
+    """CrewAI spells the model as `llm="gpt-4o"` -- a config parameter whose
+    value is the model name itself. Only a `llm=` that resolves to a string
+    counts; `llm=some_client_object` stays unresolved and visible in `params`.
+    """
+    if not any(keyword.arg == "llm" for keyword in call.keywords):
+        return None
+    values = resolve_call_parameter(module, call, "llm")
+    return values.resolved[0] if len(values.resolved) == 1 else None
 
 
 def _model_from_config_dict(call: ast.Call) -> str | None:
