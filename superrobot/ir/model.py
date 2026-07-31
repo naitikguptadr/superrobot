@@ -25,6 +25,7 @@ it -- with the loss recorded in `residue` rather than left implicit.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -121,6 +122,23 @@ class ToolParam(BaseModel):
     object_schema: dict[str, object] | None = None
 
 
+class ToolAuth(BaseModel):
+    """Mirrors `agent_spec.md`'s `auth_spec`. `auth_method` is constrained to
+    the set DataRobot's own reference table defines, so an unrepresentable
+    scheme surfaces here rather than in a spec DataRobot's tooling rejects.
+    """
+
+    service_name: str
+    auth_method: Literal[
+        "api_key",
+        "oauth2",
+        "basic_auth",
+        "bearer_token",
+        "service_account",
+        "other",
+    ] = "other"
+
+
 class Tool(IRElement):
     name: str
     callable: str
@@ -129,7 +147,7 @@ class Tool(IRElement):
     inputs: list[ToolParam] = Field(default_factory=list)
     outputs: list[ToolParam] = Field(default_factory=list)
     side_effects: list[str] = Field(default_factory=list)
-    auth: str | None = None
+    auth: ToolAuth | None = None
 
 
 class LlmCall(IRElement):
@@ -225,6 +243,16 @@ class Coverage(BaseModel):
         )
 
 
+class Frontend(BaseModel):
+    """`agent_spec.md`'s `frontend` block. `chat` is the template's default
+    UI; anything else means the recipe's frontend must be replaced.
+    """
+
+    type: Literal["chat", "multi-page", "custom"] = "chat"
+    pages: list[str] = Field(default_factory=list)
+    requirements: str | None = None
+
+
 class MigrationIR(BaseModel):
     """The complete understanding of one source agent."""
 
@@ -232,6 +260,10 @@ class MigrationIR(BaseModel):
     name: str
     description: str | None = None
     system_prompt: str | None = None
+    examples: list[str] = Field(default_factory=list)
+    """Representative user inputs. `agent_spec.md` requires this field, and
+    `rehearsal.py` uses it to drive the pre-build simulation."""
+    frontend: Frontend = Field(default_factory=Frontend)
     entry_points: list[EntryPoint] = Field(default_factory=list)
     tools: list[Tool] = Field(default_factory=list)
     llm_calls: list[LlmCall] = Field(default_factory=list)
