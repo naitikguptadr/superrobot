@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { registerIrTools } from "./ir-bridge.ts";
 import { registerSuperRobotTools } from "./tools.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -61,6 +62,7 @@ export default function (pi: ExtensionAPI) {
   const model = process.env.SUPERROBOT_MODEL || "azure/gpt-5-5-2026-04-23";
 
   registerSuperRobotTools(pi);
+  registerIrTools(pi);
 
   if (gatewayBaseUrl) {
     pi.registerProvider(PROVIDER_NAME, {

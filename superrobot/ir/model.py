@@ -260,6 +260,10 @@ class MigrationIR(BaseModel):
     name: str
     description: str | None = None
     system_prompt: str | None = None
+    target_framework: str = "base"
+    """Which DataRobot recipe framework to scaffold, derived from the
+    orchestration topology rather than from an import-name guess. One of
+    `superrobot.dr.scaffold.FRAMEWORKS`."""
     examples: list[str] = Field(default_factory=list)
     """Representative user inputs. `agent_spec.md` requires this field, and
     `rehearsal.py` uses it to drive the pre-build simulation."""
