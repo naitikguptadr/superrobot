@@ -28,7 +28,7 @@ import re
 
 import yaml
 
-from superrobot.ir.model import MigrationIR, Tool, ToolParam
+from superrobot.ir.model import MigrationIR, Severity, Tool, ToolParam
 
 # The types `agent_spec.md` can express, per `rehearsal.py`'s TYPE_MAP.
 _SPEC_TYPES = ("str", "int", "float", "bool", "list", "dict")
@@ -137,6 +137,13 @@ def _tool(tool: Tool) -> dict[str, object]:
 
 
 def _require_clean_coverage(ir: MigrationIR) -> None:
+    blocking_residue = [r for r in ir.residue if r.severity is Severity.BLOCKING]
+    if blocking_residue:
+        raise ProjectionError(
+            "refusing to project: blocking residue was recorded.\n  "
+            + "\n  ".join(f"{r.description} -- {r.reason}" for r in blocking_residue)
+        )
+
     if ir.coverage is None:
         raise ProjectionError(
             "refusing to project: no coverage ledger was recorded, so nothing "

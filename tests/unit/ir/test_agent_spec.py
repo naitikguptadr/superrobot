@@ -21,6 +21,8 @@ from superrobot.ir.model import (
     Evidence,
     LlmCall,
     MigrationIR,
+    Residue,
+    Severity,
     SourceFact,
     Tool,
     ToolAuth,
@@ -127,6 +129,45 @@ def test_it_refuses_to_emit_a_spec_when_the_ledger_is_not_clean() -> None:
         migration_ir_to_agent_spec(ir)
 
     assert "llm-2" in str(excinfo.value)
+
+
+def test_it_refuses_when_blocking_residue_was_recorded() -> None:
+    """A ledger over zero facts reconciles perfectly, so the ledger alone
+    cannot gate this. Blocking residue is how "we found nothing and that is
+    suspicious" gets represented.
+    """
+    ir = _ir(
+        residue=[
+            Residue(
+                description="no LLM call site was found in this repo",
+                reason="the probe more likely missed a pattern",
+                severity=Severity.BLOCKING,
+                evidence=[_evidence()],
+            )
+        ]
+    )
+
+    with pytest.raises(ProjectionError) as excinfo:
+        migration_ir_to_agent_spec(ir)
+
+    assert "no LLM call site" in str(excinfo.value)
+
+
+def test_non_blocking_residue_is_reported_but_does_not_refuse() -> None:
+    ir = _ir(
+        residue=[
+            Residue(
+                description="retry wrapper on tool calls",
+                reason="no equivalent in the recipe",
+                severity=Severity.WARNING,
+                evidence=[_evidence()],
+            )
+        ]
+    )
+
+    rendered = migration_ir_to_agent_spec(ir)
+
+    assert "retry wrapper on tool calls" in rendered
 
 
 def test_it_refuses_when_no_coverage_was_recorded_at_all() -> None:
